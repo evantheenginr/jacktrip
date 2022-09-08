@@ -170,10 +170,15 @@ class DataProtocol : public QThread
 
     struct PktStat {
         uint32_t tot;
+        uint32_t totDelta;
         uint32_t lost;
         uint32_t outOfOrder;
         uint32_t revived;
         uint32_t statCount;
+        uint32_t udpWaited10msCount;
+        uint32_t udpWaited20msCount;
+        uint32_t udpWaited30msCount;
+        uint32_t udpWaitedTooLongCount;
     };
     virtual bool getStats(PktStat*) { return false; }
 

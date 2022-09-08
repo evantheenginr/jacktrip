@@ -634,14 +634,16 @@ void JackTrip::onStatTimer()
     if (!mAudioTesterP.isNull() && mAudioTesterP->getEnabled()) {
         mIOStatLogStream << "\n";
     }
-    if (getBufferStrategy() != 3)
-        mIOStatLogStream << now.toLocal8Bit().constData() << " "
+    if (getBufferStrategy() != 3){
+        /*mIOStatLogStream << now.toLocal8Bit().constData() << " "
                          << getPeerAddress().toLocal8Bit().constData()
+                         << ":" << mSenderPeerPort << " "
+                         << "waits: " << pkt_stat.udpWaited10msCount << "/" << pkt_stat.udpWaited20msCount << "/" << pkt_stat.udpWaited30msCount << "/" << pkt_stat.udpWaitedTooLongCount
                          << " send: " << send_io_stat.underruns << "/"
                          << send_io_stat.overflows << " recv: " << recv_io_stat.underruns
                          << "/" << recv_io_stat.overflows << " prot: " << pkt_stat.lost
                          << "/" << pkt_stat.outOfOrder << "/" << pkt_stat.revived
-                         << " tot: " << pkt_stat.tot << " sync: " << recv_io_stat.level
+                         << " tot: " << pkt_stat.totDelta << "/" << pkt_stat.tot << " sync: " << recv_io_stat.level
                          << "/" << recv_io_stat.buf_inc_underrun << "/"
                          << recv_io_stat.buf_inc_compensate << "/"
                          << recv_io_stat.buf_dec_overflows << "/"
@@ -650,8 +652,39 @@ void JackTrip::onStatTimer()
                          << " bcast: " << recv_io_stat.broadcast_skew << "/"
                          << recv_io_stat.broadcast_delta
                          << " autoq: " << 0.1 * recv_io_stat.autoq_corr << "/"
-                         << 0.1 * recv_io_stat.autoq_rate << endl;
-    else {  // bufstrategy 3
+                         << 0.1 * recv_io_stat.autoq_rate << endl;*/
+        mIOStatLogStream << "{"
+                         << "\"interval\":" << mIOStatTimeout << "," 
+                         << "\"time\":\"" << now.toLocal8Bit().constData() << "\","
+                         << "\"remote_client_name\":\"" << mJackClientName.toLocal8Bit().constData() << "\","
+                         << "\"peer\":\"" << getPeerAddress().toLocal8Bit().constData() << "\","
+                         << "\"port\":" << mSenderPeerPort << ","
+                         << "\"udp_waited_10ms\":" << pkt_stat.udpWaited10msCount << ","
+                         << "\"udp_waited_20ms\":" << pkt_stat.udpWaited20msCount << ","
+                         << "\"udp_waited_30ms\":" << pkt_stat.udpWaited30msCount << ","
+                         << "\"udp_waited_too_long\":" << pkt_stat.udpWaitedTooLongCount << ","
+                         << "\"send_underruns\":" << send_io_stat.underruns << ","
+                         << "\"send_overflows\":" << send_io_stat.overflows << ","
+                         << "\"recv_underruns\":" << recv_io_stat.underruns << ","
+                         << "\"recv_overflows\":" << recv_io_stat.overflows << ","
+                         << "\"prot_lost\":" << pkt_stat.lost << ","
+                         << "\"prot_out_of_order\":" << pkt_stat.outOfOrder << ","
+                         << "\"prot_revived\":" << pkt_stat.revived << ","
+                         << "\"prot_tot_delta\":" << pkt_stat.totDelta << ","
+                         << "\"prot_tot\":" << pkt_stat.tot << ","
+                         << "\"sync_level\":" << recv_io_stat.level << ","
+                         << "\"sync_buf_inc_underrun\":" << recv_io_stat.buf_inc_underrun << ","
+                         << "\"sync_buf_inc_compensate\":" << recv_io_stat.buf_inc_compensate << ","
+                         << "\"sync_buf_dec_overflows\":" << recv_io_stat.buf_dec_overflows << ","
+                         << "\"sync_buf_dec_pktloss\":" << recv_io_stat.buf_dec_pktloss << ","
+                         << "\"skew\":" << recv_io_stat.skew << ","
+                         << "\"skew_raw\":" << recv_io_stat.skew_raw << ","
+                         << "\"bcast_skew\":" << recv_io_stat.broadcast_skew << ","
+                         << "\"bcast_delta\":" << recv_io_stat.broadcast_delta << ","
+                         << "\"autoq_corr\":" << 0.1 * recv_io_stat.autoq_corr << ","
+                         << "\"autoq_rate\":" << 0.1 * recv_io_stat.autoq_rate
+                         << "}" << endl;
+    }else {  // bufstrategy 3
         mIOStatLogStream
             << now.toLocal8Bit().constData() << " "
             << getPeerAddress().toLocal8Bit().constData()

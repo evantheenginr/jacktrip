@@ -222,7 +222,12 @@ class UdpDataProtocol : public DataProtocol
     unsigned int mUdpRedundancyFactor;  ///< Factor of redundancy
     static QMutex sUdpMutex;            ///< Mutex to make thread safe the binding process
 
+    std::atomic<uint32_t> mUdpWaited10msCount;
+    std::atomic<uint32_t> mUdpWaited20msCount;
+    std::atomic<uint32_t> mUdpWaited30msCount;
+    std::atomic<uint32_t> mUdpWaitedTooLongCount;
     std::atomic<uint32_t> mTotCount;
+    uint32_t mTotCountDelta;
     std::atomic<uint32_t> mLostCount;
     std::atomic<uint32_t> mOutOfOrderCount;
     std::atomic<uint32_t> mRevivedCount;
