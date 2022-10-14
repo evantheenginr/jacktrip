@@ -614,12 +614,17 @@ void UdpDataProtocol::run()
         uint16_t last_seq_num    = 0;  // Store last package sequence number
         uint16_t newer_seq_num   = 0;  // Store newer sequence number
         mTotCount                = 0;
+        mTotCountDelta           = 0;
         mLostCount               = 0;
         mOutOfOrderCount         = 0;
         mLastOutOfOrderCount     = 0;
         mInitialState            = true;
         mRevivedCount            = 0;
         mStatCount               = 0;
+        mUdpWaited10msCount      = 0;
+        mUdpWaited20msCount      = 0;
+        mUdpWaited30msCount      = 0;
+        mUdpWaitedTooLongCount   = 0;
 
         //Set up our platform specific polling mechanism. (kqueue, epoll)
 #if !defined (MANUAL_POLL) && !defined (_WIN32)
@@ -749,12 +754,42 @@ void UdpDataProtocol::waitForReady(int timeout_msec)
 //*******************************************************************************
 void UdpDataProtocol::printUdpWaitedTooLong(int wait_msec)
 {
+    /*
     int wait_time = 30;  // msec
     if (!(wait_msec % wait_time)) {
         std::cerr << "UDP waiting too long (more than " << wait_time << "ms) for "
                   << mPeerAddress.toString().toStdString() << "..." << endl;
         emit signalUdpWaitingTooLong();
     }
+    */
+   
+    if(wait_msec >= 10){
+        switch(wait_msec){
+            case 10:
+            mUdpWaited10msCount++;
+            break;
+            case 20:
+            if(mUdpWaited10msCount) mUdpWaited10msCount--;
+            mUdpWaited20msCount++;
+            break;
+            case 30:
+            if(mUdpWaited10msCount) mUdpWaited10msCount--;
+            if(mUdpWaited20msCount) mUdpWaited20msCount--;
+            mUdpWaited30msCount++;
+            break;
+            case 40:
+            if(mUdpWaited10msCount) mUdpWaited10msCount--;
+            if(mUdpWaited20msCount) mUdpWaited20msCount--;
+            if(mUdpWaited30msCount) mUdpWaited30msCount--;
+            mUdpWaitedTooLongCount++;
+        }
+        /*std::cerr << "UDP waiting too long (" << wait_msec << " ms) for "
+                  << mPeerAddress.toString().toStdString() << ":" 
+                  << mPeerPort << "..." << endl;*/
+        emit signalUdpWaitingTooLong();
+        
+    }
+    
 }
 
 //*******************************************************************************
@@ -867,10 +902,20 @@ bool UdpDataProtocol::getStats(DataProtocol::PktStat* stat)
         mRevivedCount    = 0;
     }
     stat->tot        = mTotCount;
+    stat->totDelta   = mTotCount - mTotCountDelta;
     stat->lost       = mLostCount;
     stat->outOfOrder = mOutOfOrderCount;
     stat->revived    = mRevivedCount;
     stat->statCount  = mStatCount++;
+    stat->udpWaited10msCount = mUdpWaited10msCount;
+    stat->udpWaited20msCount = mUdpWaited20msCount;
+    stat->udpWaited30msCount = mUdpWaited30msCount;
+    stat->udpWaitedTooLongCount = mUdpWaitedTooLongCount;
+    mTotCountDelta         = mTotCount;
+    mUdpWaited10msCount    = 0;
+    mUdpWaited20msCount    = 0;
+    mUdpWaited30msCount    = 0;
+    mUdpWaitedTooLongCount = 0;
     return true;
 }
 
