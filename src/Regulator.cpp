@@ -105,14 +105,18 @@ constexpr double AutoInitValFactor =
 constexpr int WindowDivisor = 8;     // for faster auto tracking
 constexpr int MaxFPP        = 1024;  // tested up to this FPP
 //*******************************************************************************
-Regulator::Regulator(int rcvChannels, int bit_res, int FPP, int qLen, int bqLen)
+Regulator::Regulator(int rcvChannels, int bit_res, int FPP, int qLen,
+                     bool use_worker_thread, int bqLen)
     : RingBuffer(0, 0)
     , mNumChannels(rcvChannels)
     , mAudioBitRes(bit_res)
     , mFPP(FPP)
     , mMsecTolerance((double)qLen)  // handle non-auto mode, expects positive qLen
     , mAuto(false)
+    , mUseWorkerThread(use_worker_thread)
     , m_b_BroadcastQueueLength(bqLen)
+    , mRegulatorThreadPtr(NULL)
+    , mRegulatorWorkerPtr(NULL)
 {
     // catch settings that are compute bound using long HIST
     // hub client rcvChannels is set from client's settings parameters
@@ -155,9 +159,13 @@ Regulator::Regulator(int rcvChannels, int bit_res, int FPP, int qLen, int bqLen)
 
     if (gVerboseFlag)
         cout << "mHist = " << mHist << " at " << mFPP << "\n";
-    mBytes     = mFPP * mNumChannels * mBitResolutionMode;
-    mXfrBuffer = new int8_t[mBytes];
-    mPacketCnt = 0;  // burg initialization
+    mBytes      = mFPP * mNumChannels * mBitResolutionMode;
+    mPullQueue  = new int8_t[mBytes * 2];
+    mXfrBuffer  = mPullQueue;
+    mPacketCnt  = 0;  // burg initialization
+    mLastPacket = nullptr;
+    mNextPacket.store(mLastPacket, std::memory_order_release);
+    mWorkerUnderruns = 0;
     mFadeUp.resize(mFPP, 0.0);
     mFadeDown.resize(mFPP, 0.0);
     for (int i = 0; i < mFPP; i++) {
@@ -203,11 +211,19 @@ Regulator::Regulator(int rcvChannels, int bit_res, int FPP, int qLen, int bqLen)
     changeGlobal_3(LostWindowMax);
     changeGlobal_2(NumSlotsMax);  // need hg if running GUI
     if (m_b_BroadcastQueueLength) {
-        m_b_ReceiveRingBuffer = new JitterBuffer(
+        m_b_BroadcastRingBuffer = new JitterBuffer(
             mFPP, qLen, 48000, 1, m_b_BroadcastQueueLength, mNumChannels, mAudioBitRes);
         qDebug() << "Broadcast started in Regulator with packet queue of"
                  << m_b_BroadcastQueueLength;
         // have not implemented the mJackTrip->queueLengthChanged functionality
+    }
+    if (mUseWorkerThread) {
+        mRegulatorThreadPtr = new QThread();
+        mRegulatorThreadPtr->setObjectName("RegulatorThread");
+        RegulatorWorker* workerPtr = new RegulatorWorker(this);
+        workerPtr->moveToThread(mRegulatorThreadPtr);
+        mRegulatorThreadPtr->start();
+        mRegulatorWorkerPtr = workerPtr;
     }
 }
 
@@ -241,7 +257,7 @@ void Regulator::printParams(){
 
 Regulator::~Regulator()
 {
-    delete[] mXfrBuffer;
+    delete[] mPullQueue;
     delete[] mZeros;
     delete[] mAssembledPacket;
     delete pushStat;
@@ -252,7 +268,15 @@ Regulator::~Regulator()
         delete[] slot;
     };
     if (m_b_BroadcastQueueLength)
-        delete m_b_ReceiveRingBuffer;
+        delete m_b_BroadcastRingBuffer;
+    if (mRegulatorWorkerPtr != nullptr)
+        delete mRegulatorWorkerPtr;
+    if (mRegulatorThreadPtr != nullptr) {
+        // Stop the Regulator thread
+        mRegulatorThreadPtr->quit();
+        mRegulatorThreadPtr->wait();
+        delete mRegulatorThreadPtr;
+    }
 }
 
 void Regulator::setFPPratio()
@@ -279,7 +303,8 @@ void Regulator::shimFPP(const int8_t* buf, int len, int seq_num)
 {
     if (seq_num != -1) {
         if (!mFPPratioIsSet) {  // first peer packet
-            mPeerFPP = len / (mNumChannels * mBitResolutionMode);
+            mPeerFPP        = len / (mNumChannels * mBitResolutionMode);
+            mPeerFPPdurMsec = 1000.0 * mPeerFPP / 48000.0;
             // bufstrategy 1 autoq mode overloads qLen with negative val
             // creates this ugly code
             if (mMsecTolerance < 0) {  // handle -q auto or, for example, -q auto10
@@ -336,7 +361,8 @@ void Regulator::shimFPP(const int8_t* buf, int len, int seq_num)
             }
         }
         pushStat->tick();
-        double adjustAuto = pushStat->calcAuto(mAutoHeadroom, mFPPdurMsec);
+        double adjustAuto =
+            pushStat->calcAuto(mAutoHeadroom, mFPPdurMsec, mPeerFPPdurMsec);
         //        qDebug() << adjustAuto;
         if (mAuto && (pushStat->lastTime > AutoInitDur))
             mMsecTolerance = adjustAuto;
@@ -346,6 +372,8 @@ void Regulator::shimFPP(const int8_t* buf, int len, int seq_num)
 //*******************************************************************************
 void Regulator::pushPacket(const int8_t* buf, int seq_num)
 {
+    if (m_b_BroadcastQueueLength)
+        m_b_BroadcastRingBuffer->insertSlotNonBlocking(buf, mBytes, 0, seq_num);
     QMutexLocker locker(&mMutex);
     seq_num %= mModSeqNum;
     // if (seq_num==0) return;   // impose regular loss
@@ -358,6 +386,13 @@ void Regulator::pushPacket(const int8_t* buf, int seq_num)
 
 //*******************************************************************************
 void Regulator::pullPacket(int8_t* buf)
+{  // only for mBufferStrategy == 4, not using workerThread
+    pullPacket();
+    memcpy(buf, mXfrBuffer, mBytes);
+}
+
+//*******************************************************************************
+void Regulator::pullPacket()
 {
     QMutexLocker locker(&mMutex);
     mSkip = 0;
@@ -382,6 +417,19 @@ void Regulator::pullPacket(int8_t* buf)
                 goto PACKETOK;
             }
         }
+        // make this a global value? -- same threshold as
+        // UdpDataProtocol::printUdpWaitedTooLong
+        double wait_time = 30;  // msec
+        if ((mLastSeqNumOut == mLastSeqNumIn)
+            && ((now - mIncomingTiming[mLastSeqNumOut]) > wait_time)) {
+            //                        std::cout << (mIncomingTiming[mLastSeqNumOut] - now)
+            //                        << "mLastSeqNumIn: " << mLastSeqNumIn <<
+            //                        "\tmLastSeqNumOut: " << mLastSeqNumOut << std::endl;
+            goto ZERO_OUTPUT;
+        }  // "good underrun", not a stuck client
+        //                    std::cout << "within window -- mLastSeqNumIn: " <<
+        //                    mLastSeqNumIn <<
+        //                    "\tmLastSeqNumOut: " << mLastSeqNumOut << std::endl;
         goto UNDERRUN;
     }
 
@@ -406,7 +454,13 @@ ZERO_OUTPUT:
     memcpy(mXfrBuffer, mZeros, mBytes);
 
 OUTPUT:
-    memcpy(buf, mXfrBuffer, mBytes);
+    // swap positions of mXfrBuffer and mNextPacket
+    mNextPacket.store(mXfrBuffer, std::memory_order_release);
+    if (mXfrBuffer == mPullQueue) {
+        mXfrBuffer = mPullQueue + mBytes;
+    } else {
+        mXfrBuffer = mPullQueue;
+    }
 };
 
 //*******************************************************************************
@@ -643,6 +697,9 @@ void BurgAlgorithm::predict(std::vector<long double>& coeffs, std::vector<float>
 //*******************************************************************************
 ChanData::ChanData(int i, int FPP, int hist) : ch(i)
 {
+    int shrinkCoeffsFactor = 1;
+    if (FPP == 1024)
+        shrinkCoeffsFactor = 8;
     trainSamps = (hist * FPP);
     mTruth.resize(FPP, 0.0);
     mXfadedPred.resize(FPP, 0.0);
@@ -653,7 +710,7 @@ ChanData::ChanData(int i, int FPP, int hist) : ch(i)
     }
     mTrain.resize(trainSamps, 0.0);
     mPrediction.resize(trainSamps - 1, 0.0);  // ORDER
-    mCoeffs.resize(trainSamps - 2, 0.0);
+    mCoeffs.resize(trainSamps / shrinkCoeffsFactor - 2, 0.0);
     mCrossFadeDown.resize(FPP, 0.0);
     mCrossFadeUp.resize(FPP, 0.0);
     mCrossfade.resize(FPP, 0.0);
@@ -688,7 +745,7 @@ void StdDev::reset()
     max          = -999999.0;
 };
 
-double StdDev::calcAuto(double autoHeadroom, double localFPPdur)
+double StdDev::calcAuto(double autoHeadroom, double localFPPdur, double peerFPPdur)
 {
     //    qDebug() << longTermStdDev << longTermMax << AutoMax << window <<
     //    longTermCnt;
@@ -696,7 +753,9 @@ double StdDev::calcAuto(double autoHeadroom, double localFPPdur)
         return AutoMax;
     double tmp = longTermStdDev + ((longTermMax > AutoMax) ? AutoMax : longTermMax);
     if (tmp < localFPPdur)
-        tmp = localFPPdur;  // might also check peerFPP...
+        tmp = localFPPdur;
+    if (tmp < peerFPPdur)
+        tmp = peerFPPdur;
     tmp += autoHeadroom;
     return tmp;
 };
@@ -748,6 +807,29 @@ void StdDev::tick()
     }
 }
 
+void Regulator::readSlotNonBlocking(int8_t* ptrToReadSlot)
+{
+    if (mUseWorkerThread) {
+        // use separate worker thread for PLC
+        const void* ptrToPacket = mNextPacket.load(std::memory_order_acquire);
+        if (ptrToPacket == mLastPacket) {
+            mWorkerUnderruns++;
+            ::memset(ptrToReadSlot, 0, mBytes);
+            if (ptrToPacket == nullptr) {
+                // first time run
+                mRegulatorWorkerPtr->startPullingNextPacket();
+            }
+        } else {
+            ::memcpy(ptrToReadSlot, ptrToPacket, mBytes);
+            mLastPacket = ptrToPacket;
+            mRegulatorWorkerPtr->startPullingNextPacket();
+        }
+    } else {
+        // use jack callback thread to perform PLC
+        pullPacket(ptrToReadSlot);
+    }
+}
+
 //*******************************************************************************
 bool Regulator::getStats(RingBuffer::IOStat* stat, bool reset)
 {
@@ -762,6 +844,11 @@ bool Regulator::getStats(RingBuffer::IOStat* stat, bool reset)
         mBufIncUnderrun   = 0;
         mBufIncCompensate = 0;
         mBroadcastSkew    = 0;
+    }
+
+    if (mUseWorkerThread) {
+        cout << "PLC worker underruns: " << mWorkerUnderruns << endl;
+        mWorkerUnderruns = 0;
     }
 
     // hijack  of  struct IOStat {

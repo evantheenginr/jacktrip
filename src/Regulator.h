@@ -46,9 +46,15 @@
 
 #include <QDebug>
 #include <QElapsedTimer>
+#include <atomic>
+#include <cstring>
 
 #include "AudioInterface.h"
 #include "RingBuffer.h"
+#include "jacktrip_globals.h"
+
+// forward declaration
+class RegulatorWorker;
 
 class BurgAlgorithm
 {
@@ -88,7 +94,7 @@ class StdDev
    public:
     StdDev(int id, QElapsedTimer* timer, int w);
     void tick();
-    double calcAuto(double autoHeadroom, double localFPPdur);
+    double calcAuto(double autoHeadroom, double localFPPdur, double peerFPPdur);
     int mId;
     int plcOverruns;
     int plcUnderruns;
@@ -121,7 +127,8 @@ class StdDev
 class Regulator : public RingBuffer
 {
    public:
-    Regulator(int rcvChannels, int bit_res, int FPP, int qLen, int bqLen);
+    Regulator(int rcvChannels, int bit_res, int FPP, int qLen, bool use_worker_thread,
+              int bqLen);
     virtual ~Regulator();
 
     void shimFPP(const int8_t* buf, int len, int seq_num);
@@ -131,23 +138,22 @@ class Regulator : public RingBuffer
     // if (!mJackTrip->writeAudioBuffer(src, host_buf_size, last_seq_num))
     // instead of
     // if (!mJackTrip->writeAudioBuffer(src, host_buf_size, gap_size))
-    virtual bool insertSlotNonBlockingRegulator(const int8_t* ptrToSlot,
-                                                [[maybe_unused]] int len,
-                                                [[maybe_unused]] int seq_num, int lostLen)
+    virtual bool insertSlotNonBlocking(const int8_t* ptrToSlot, int len,
+                                       [[maybe_unused]] int lostLen, int seq_num)
     {
         shimFPP(ptrToSlot, len, seq_num);
-        if (m_b_BroadcastQueueLength)
-            m_b_ReceiveRingBuffer->insertSlotNonBlocking(ptrToSlot, len, lostLen);
         return (true);
     }
 
     void pullPacket(int8_t* buf);
 
-    virtual void readSlotNonBlocking(int8_t* ptrToReadSlot) { pullPacket(ptrToReadSlot); }
+    void pullPacket();
+
+    virtual void readSlotNonBlocking(int8_t* ptrToReadSlot);
+
     virtual void readBroadcastSlot(int8_t* ptrToReadSlot)
     {
-        m_b_ReceiveRingBuffer->readSlotNonBlocking(ptrToReadSlot);
-        m_b_ReceiveRingBuffer->readBroadcastSlot(ptrToReadSlot);
+        m_b_BroadcastRingBuffer->readBroadcastSlot(ptrToReadSlot);
     }
 
     //    virtual QString getStats(uint32_t statCount, uint32_t lostCount);
@@ -169,7 +175,11 @@ class Regulator : public RingBuffer
     BurgAlgorithm ba;
     int mBytes;
     int mBytesPeerPacket;
+    int8_t* mPullQueue;
     int8_t* mXfrBuffer;
+    const void* mLastPacket;
+    int mWorkerUnderruns;
+    std::atomic<const void*> mNextPacket;
     int8_t* mAssembledPacket;
     int mPacketCnt;
     sample_t bitsToSample(int ch, int frame);
@@ -199,12 +209,54 @@ class Regulator : public RingBuffer
     int mModSeqNumPeer;
     double mAutoHeadroom;
     double mFPPdurMsec;
+    double mPeerFPPdurMsec;
+    bool mUseWorkerThread;
     void changeGlobal(double);
     void changeGlobal_2(int);
     void changeGlobal_3(int);
     void printParams();
-    /// Pointer for the Receive RingBuffer
-    RingBuffer* m_b_ReceiveRingBuffer;
+
+    /// Pointer for the Broadcast RingBuffer
+    RingBuffer* m_b_BroadcastRingBuffer;
     int m_b_BroadcastQueueLength;
+
+    /// thread used to pull packets from Regulator (if mBufferStrategy==3)
+    QThread* mRegulatorThreadPtr;
+    /// worker used to pull packets from Regulator (if mBufferStrategy==3)
+    RegulatorWorker* mRegulatorWorkerPtr;
 };
+
+class RegulatorWorker : public QObject
+{
+    Q_OBJECT;
+
+   public:
+    RegulatorWorker(Regulator* rPtr) : mRegulatorPtr(rPtr)
+    {
+        QObject::connect(this, &RegulatorWorker::startup, this,
+                         &RegulatorWorker::setRealtimePriority, Qt::QueuedConnection);
+        QObject::connect(this, &RegulatorWorker::signalPullPacket, this,
+                         &RegulatorWorker::pullPacket, Qt::QueuedConnection);
+        emit startup();
+    }
+    virtual ~RegulatorWorker() {}
+    void startPullingNextPacket() { emit signalPullPacket(); }
+
+   signals:
+    void signalPullPacket();
+    void startup();
+
+   public slots:
+    void pullPacket()
+    {
+        if (mRegulatorPtr != nullptr) {
+            mRegulatorPtr->pullPacket();
+        }
+    }
+    void setRealtimePriority() { setRealtimeProcessPriority(); }
+
+   private:
+    Regulator* mRegulatorPtr;
+};
+
 #endif  //__REGULATOR_H__

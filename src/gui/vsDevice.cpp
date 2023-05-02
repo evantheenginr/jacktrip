@@ -40,7 +40,8 @@
 #include <QDebug>
 
 // Constructor
-VsDevice::VsDevice(QOAuth2AuthorizationCodeFlow* authenticator, QObject* parent)
+VsDevice::VsDevice(QOAuth2AuthorizationCodeFlow* authenticator, bool testMode,
+                   QObject* parent)
     : QObject(parent), m_authenticator(authenticator)
 {
     QSettings settings;
@@ -49,8 +50,80 @@ VsDevice::VsDevice(QOAuth2AuthorizationCodeFlow* authenticator, QObject* parent)
     m_apiSecret = settings.value(QStringLiteral("ApiSecret"), "").toString();
     m_appUUID   = settings.value(QStringLiteral("AppUUID"), "").toString();
     m_appID     = settings.value(QStringLiteral("AppID"), "").toString();
+    settings.endGroup();
+    settings.beginGroup(QStringLiteral("Audio"));
+    m_captureVolume =
+        (float)settings.value(QStringLiteral("InMultiplier"), 1.0).toDouble();
+    m_captureMute = settings.value(QStringLiteral("InMuted"), false).toBool();
+    m_playbackVolume =
+        (float)settings.value(QStringLiteral("OutMultiplier"), 1.0).toDouble();
+    m_playbackMute = settings.value(QStringLiteral("OutMuted"), false).toBool();
+    settings.endGroup();
 
-    sendHeartbeat();
+    m_sendVolumeTimer = new QTimer(this);
+    m_sendVolumeTimer->setSingleShot(true);
+    connect(m_sendVolumeTimer, &QTimer::timeout, this, &VsDevice::sendLevels);
+
+    // Determine which API host to use
+    m_apiHost = PROD_API_HOST;
+    if (testMode) {
+        m_apiHost = TEST_API_HOST;
+    }
+
+    // Set server levels to stored versions
+    QJsonObject json = {
+        {QLatin1String("captureVolume"), (int)(m_captureVolume * 100.0)},
+        {QLatin1String("captureMute"), m_captureMute},
+        {QLatin1String("playbackVolume"), (int)(m_playbackVolume * 100.0)},
+        {QLatin1String("playbackMute"), m_playbackMute},
+    };
+    QJsonDocument request = QJsonDocument(json);
+
+    QNetworkReply* reply = m_authenticator->put(
+        QStringLiteral("https://%1/api/devices/%2").arg(m_apiHost, m_appID),
+        request.toJson());
+    connect(reply, &QNetworkReply::finished, this, [=]() {
+        // Got error
+        if (reply->error() != QNetworkReply::NoError) {
+            QVariant statusCode =
+                reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
+            if (!statusCode.isValid()) {
+                std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
+                reply->deleteLater();
+                return;
+            }
+        } else {
+            QByteArray response       = reply->readAll();
+            QJsonDocument deviceState = QJsonDocument::fromJson(response);
+
+            // capture (input) volume
+            m_captureVolume =
+                (float)(deviceState.object()[QStringLiteral("captureVolume")].toDouble()
+                        / 100.0);
+            m_captureMute = deviceState.object()[QStringLiteral("captureMute")].toBool();
+            emit updatedCaptureVolumeFromServer(m_captureVolume);
+            emit updatedCaptureMuteFromServer(m_captureMute);
+
+            // playback (output) volume
+            m_playbackVolume =
+                (float)(deviceState.object()[QStringLiteral("playbackVolume")].toDouble()
+                        / 100.0);
+            m_playbackMute =
+                deviceState.object()[QStringLiteral("playbackMute")].toBool();
+            emit updatedPlaybackVolumeFromServer(m_playbackVolume);
+            emit updatedPlaybackMuteFromServer(m_playbackMute);
+        }
+
+        QSettings settings;
+        settings.beginGroup(QStringLiteral("Audio"));
+        settings.setValue(QStringLiteral("InMultiplier"), m_captureVolume);
+        settings.setValue(QStringLiteral("InMuted"), m_captureMute);
+        settings.setValue(QStringLiteral("OutMultiplier"), m_playbackVolume);
+        settings.setValue(QStringLiteral("OutMuted"), m_playbackMute);
+        settings.endGroup();
+
+        reply->deleteLater();
+    });
 }
 
 // registerApp idempotently registers an emulated device belonging to the current user
@@ -62,7 +135,7 @@ void VsDevice::registerApp()
 
     // check if device exists
     QNetworkReply* reply = m_authenticator->get(
-        QStringLiteral("https://app.jacktrip.org/api/devices/%1").arg(m_appID));
+        QStringLiteral("https://%1/api/devices/%2").arg(m_apiHost, m_appID));
     connect(reply, &QNetworkReply::finished, this, [=]() {
         // Got error
         if (reply->error() != QNetworkReply::NoError) {
@@ -70,8 +143,6 @@ void VsDevice::registerApp()
                 reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
             if (!statusCode.isValid()) {
                 std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-                // TODO: Fix me
-                // emit authFailed();
                 reply->deleteLater();
                 return;
             }
@@ -90,11 +161,11 @@ void VsDevice::registerApp()
             } else {
                 // Other error status. Won't create device.
                 std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-                // TODO: Fix me
-                // emit authFailed();
                 reply->deleteLater();
                 return;
             }
+        } else if (m_apiPrefix != "" && m_apiSecret != "") {
+            sendHeartbeat();
         }
 
         QSettings settings;
@@ -116,12 +187,10 @@ void VsDevice::removeApp()
     }
 
     QNetworkReply* reply = m_authenticator->deleteResource(
-        QStringLiteral("https://app.jacktrip.org/api/devices/%1").arg(m_appID));
+        QStringLiteral("https://%1/api/devices/%2").arg(m_apiHost, m_appID));
     connect(reply, &QNetworkReply::finished, this, [=]() {
         if (reply->error() != QNetworkReply::NoError) {
             std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-            // TODO: Fix me
-            // emit authFailed();
             reply->deleteLater();
             return;
         } else {
@@ -147,10 +216,10 @@ void VsDevice::removeApp()
 void VsDevice::sendHeartbeat()
 {
     if (m_webSocket == nullptr) {
-        m_webSocket = new VsWebSocket(
-            QUrl(QStringLiteral("wss://app.jacktrip.org/api/devices/%1/heartbeat")
-                     .arg(m_appID)),
-            m_authenticator->token(), m_apiPrefix, m_apiSecret);
+        m_webSocket =
+            new VsWebSocket(QUrl(QStringLiteral("wss://%1/api/devices/%2/heartbeat")
+                                     .arg(m_apiHost, m_appID)),
+                            m_authenticator->token(), m_apiPrefix, m_apiSecret);
         connect(m_webSocket, &VsWebSocket::textMessageReceived, this,
                 &VsDevice::onTextMessageReceived);
     }
@@ -211,14 +280,11 @@ void VsDevice::sendHeartbeat()
     } else {
         // Send heartbeat via POST API
         QNetworkReply* reply = m_authenticator->post(
-            QStringLiteral("https://app.jacktrip.org/api/devices/%1/heartbeat")
-                .arg(m_appID),
+            QStringLiteral("https://%1/api/devices/%2/heartbeat").arg(m_apiHost, m_appID),
             request.toJson());
         connect(reply, &QNetworkReply::finished, this, [=]() {
             if (reply->error() != QNetworkReply::NoError) {
                 std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-                // TODO: Fix me
-                // emit authFailed();
                 reply->deleteLater();
                 return;
             } else {
@@ -231,6 +297,32 @@ void VsDevice::sendHeartbeat()
     }
 }
 
+bool VsDevice::reconnect()
+{
+    return m_reconnect;
+}
+
+void VsDevice::setReconnect(bool reconnect)
+{
+    m_reconnect = reconnect;
+    if (reconnect) {
+        qDebug() << "perform reconnect things";
+        stopPinger();
+        if (m_webSocket != nullptr && m_webSocket->isValid()) {
+            m_webSocket->closeSocket();
+        }
+        if (!m_jackTrip.isNull()) {
+            m_jackTrip->stop();
+            m_jackTrip.reset();
+        }
+    }
+}
+
+bool VsDevice::hasTerminated()
+{
+    return m_jackTrip.isNull();
+}
+
 // setServerId updates the emulated device with the provided serverId
 void VsDevice::setServerId(QString serverId)
 {
@@ -239,13 +331,35 @@ void VsDevice::setServerId(QString serverId)
     };
     QJsonDocument request = QJsonDocument(json);
     QNetworkReply* reply  = m_authenticator->put(
-         QStringLiteral("https://app.jacktrip.org/api/devices/%1").arg(m_appID),
+         QStringLiteral("https://%1/api/devices/%2").arg(m_apiHost, m_appID),
          request.toJson());
     connect(reply, &QNetworkReply::finished, this, [=]() {
         if (reply->error() != QNetworkReply::NoError) {
             std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-            // TODO: Fix me
-            // emit authFailed();
+            reply->deleteLater();
+            return;
+        }
+        m_deviceAgentConfig.insert("serverId", serverId);
+        reply->deleteLater();
+    });
+}
+
+void VsDevice::sendLevels()
+{
+    // Add latest volume and mute values to heartbeat body
+    QJsonObject json = {
+        {QLatin1String("captureVolume"), (int)(m_captureVolume * 100.0)},
+        {QLatin1String("captureMute"), m_captureMute},
+        {QLatin1String("playbackVolume"), (int)(m_playbackVolume * 100.0)},
+        {QLatin1String("playbackMute"), m_playbackMute},
+    };
+    QJsonDocument request = QJsonDocument(json);
+    QNetworkReply* reply  = m_authenticator->put(
+         QStringLiteral("https://%1/api/devices/%2").arg(m_apiHost, m_appID),
+         request.toJson());
+    connect(reply, &QNetworkReply::finished, this, [=]() {
+        if (reply->error() != QNetworkReply::NoError) {
+            std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
             reply->deleteLater();
             return;
         }
@@ -254,17 +368,22 @@ void VsDevice::setServerId(QString serverId)
 }
 
 // initJackTrip spawns a new jacktrip process with the desired settings
-JackTrip* VsDevice::initJackTrip([[maybe_unused]] bool useRtAudio,
-                                 [[maybe_unused]] std::string input,
-                                 [[maybe_unused]] std::string output,
-                                 [[maybe_unused]] int bufferSize,
-                                 VsServerInfo* studioInfo)
+JackTrip* VsDevice::initJackTrip(
+    [[maybe_unused]] bool useRtAudio, [[maybe_unused]] std::string input,
+    [[maybe_unused]] std::string output, [[maybe_unused]] int baseInputChannel,
+    [[maybe_unused]] int numChannelsIn, [[maybe_unused]] int baseOutputChannel,
+    [[maybe_unused]] int numChannelsOut, [[maybe_unused]] int inputMixMode,
+    [[maybe_unused]] int bufferSize, [[maybe_unused]] int bufferStrategy,
+    VsServerInfo* studioInfo)
 {
-    m_jackTrip.reset(new JackTrip(JackTrip::CLIENTTOPINGSERVER, JackTrip::UDP, 2, 2,
+    m_jackTrip.reset(
+        new JackTrip(JackTrip::CLIENTTOPINGSERVER, JackTrip::UDP, baseInputChannel,
+                     numChannelsIn, baseOutputChannel, numChannelsOut,
+                     static_cast<AudioInterface::inputMixModeT>(inputMixMode),
 #ifdef WAIR  // wair
-                                  0,
+                     0,
 #endif  // endwhere
-                                  4, 1));
+                     4, 1));
     m_jackTrip->setConnectDefaultAudioPorts(true);
 #ifdef RT_AUDIO
     if (useRtAudio) {
@@ -275,9 +394,21 @@ JackTrip* VsDevice::initJackTrip([[maybe_unused]] bool useRtAudio,
         m_jackTrip->setOutputDevice(output);
     }
 #endif
+    int bindPort = selectBindPort();
+    if (bindPort == 0) {
+        return 0;
+    }
+    m_jackTrip->setBindPorts(bindPort);
     m_jackTrip->setRemoteClientName(m_appID);
-    m_jackTrip->setBufferStrategy(1);
-    m_jackTrip->setBufferQueueLength(-500);
+    // increment m_bufferStrategy by 1 for array-index mapping
+    m_jackTrip->setBufferStrategy(bufferStrategy + 1);
+    if (bufferStrategy == 2 || bufferStrategy == 3) {
+        // use -q auto3 for loss concealment
+        m_jackTrip->setBufferQueueLength(-5);
+    } else {
+        // use -q auto
+        m_jackTrip->setBufferQueueLength(-500);
+    }
     m_jackTrip->setPeerAddress(studioInfo->host());
     m_jackTrip->setPeerPorts(studioInfo->port());
     m_jackTrip->setPeerHandshakePort(studioInfo->port());
@@ -306,8 +437,12 @@ void VsDevice::startJackTrip()
 void VsDevice::stopJackTrip()
 {
     if (!m_jackTrip.isNull()) {
+        if (m_webSocket != nullptr && m_webSocket->isValid()) {
+            m_webSocket->closeSocket();
+        }
         setServerId("");
         m_jackTrip->stop();
+        m_jackTrip.reset();
     }
 }
 
@@ -321,10 +456,12 @@ void VsDevice::reconcileAgentConfig(QJsonDocument newState)
         return;
     }
     for (auto it = newObject.constBegin(); it != newObject.constEnd(); it++) {
+        // if currently enabled but new config is not enabled, disconnect immediately
+        if (enabled() && it.key() == "enabled" && !it.value().toBool()
+            && !m_jackTrip.isNull()) {
+            stopJackTrip();
+        }
         m_deviceAgentConfig.insert(it.key(), it.value());
-    }
-    if (!enabled() && !m_jackTrip.isNull()) {
-        stopJackTrip();
     }
 }
 
@@ -351,13 +488,67 @@ void VsDevice::stopPinger()
     }
 }
 
+// updateCaptureVolume sets VsDevice's capture (input) volume to the provided float
+void VsDevice::updateCaptureVolume(float multiplier)
+{
+    if (multiplier == m_captureVolume) {
+        return;
+    }
+    m_captureVolume = multiplier;
+
+    if (m_sendVolumeTimer) {
+        m_sendVolumeTimer->start(200);
+    }
+}
+
+// updateCaptureMute sets VsDevice's capture (input) mute to the provided boolean
+void VsDevice::updateCaptureMute(bool muted)
+{
+    if (muted == m_captureMute) {
+        return;
+    }
+    m_captureMute = muted;
+
+    if (m_sendVolumeTimer) {
+        m_sendVolumeTimer->start(200);
+    }
+}
+
+// updatePlaybackVolume sets VsDevice's playback (output) volume to the provided float
+void VsDevice::updatePlaybackVolume(float multiplier)
+{
+    if (multiplier == m_playbackVolume) {
+        return;
+    }
+    m_playbackVolume = multiplier;
+
+    if (m_sendVolumeTimer) {
+        m_sendVolumeTimer->start(200);
+    }
+}
+
+// updatePlaybackMute sets VsDevice's playback (output) mute to the provided boolean
+void VsDevice::updatePlaybackMute(bool muted)
+{
+    if (muted == m_playbackMute) {
+        return;
+    }
+    m_playbackMute = muted;
+
+    if (m_sendVolumeTimer) {
+        m_sendVolumeTimer->start(200);
+    }
+}
+
 // terminateJackTrip is a slot intended to be triggered on jacktrip process signals
 void VsDevice::terminateJackTrip()
 {
     if (!enabled()) {
         setServerId("");
     }
-    m_jackTrip.reset();
+    if (!m_jackTrip.isNull()) {
+        m_jackTrip.reset();
+    }
 }
 
 // onTextMessageReceived is a slot intended to be triggered by new incoming WSS messages
@@ -371,6 +562,34 @@ void VsDevice::onTextMessageReceived(const QString& message)
     if (m_pinger != nullptr && !m_pinger->active()) {
         m_pinger->setToken(token);
         m_pinger->start();
+    }
+
+    // capture (input) volume
+    bool newMute    = newState["captureMute"].toBool();
+    float newVolume = (float)(newState["captureVolume"].toDouble() / 100.0);
+
+    if (newVolume != m_captureVolume) {
+        m_captureVolume = newVolume;
+        emit updatedCaptureVolumeFromServer(m_captureVolume);
+    }
+
+    if (newMute != m_captureMute) {
+        m_captureMute = newMute;
+        emit updatedCaptureMuteFromServer(m_captureMute);
+    }
+
+    // playback (output) volume
+    newMute   = newState["playbackMute"].toBool();
+    newVolume = (float)(newState["playbackVolume"].toDouble() / 100.0);
+
+    if (newVolume != m_playbackVolume) {
+        m_playbackVolume = newVolume;
+        emit updatedPlaybackVolumeFromServer(m_playbackVolume);
+    }
+
+    if (newMute != m_playbackMute) {
+        m_playbackMute = newMute;
+        emit updatedPlaybackMuteFromServer(m_playbackMute);
     }
 
     reconcileAgentConfig(newState);
@@ -438,12 +657,10 @@ void VsDevice::registerJTAsDevice()
     QJsonDocument request = QJsonDocument(json);
 
     QNetworkReply* reply = m_authenticator->post(
-        QStringLiteral("https://app.jacktrip.org/api/devices"), request.toJson());
+        QStringLiteral("https://%1/api/devices").arg(m_apiHost), request.toJson());
     connect(reply, &QNetworkReply::finished, this, [=]() {
         if (reply->error() != QNetworkReply::NoError) {
             std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-            // TODO: Fix me
-            // emit authFailed();
             reply->deleteLater();
             return;
         } else {
@@ -454,6 +671,8 @@ void VsDevice::registerJTAsDevice()
             settings.beginGroup(QStringLiteral("VirtualStudio"));
             settings.setValue(QStringLiteral("AppID"), m_appID);
             settings.endGroup();
+
+            sendHeartbeat();
         }
 
         reply->deleteLater();
@@ -484,4 +703,22 @@ QString VsDevice::randomString(int stringLength)
     }
 
     return str;
+}
+
+// selectBindPort finds the next open bind port to use for jacktrip
+int VsDevice::selectBindPort()
+{
+    int candidate = gDefaultPort;
+    if (m_jackTrip.isNull()) {
+        return candidate;
+    }
+    int attempt = 0;
+    while (attempt <= 5000) {
+        candidate = QRandomGenerator::global()->bounded(gBindPortLow, gBindPortHigh + 1);
+        attempt++;
+        if (!m_jackTrip->checkIfPortIsBinded(candidate)) {
+            return candidate;
+        }
+    }
+    return 0;
 }

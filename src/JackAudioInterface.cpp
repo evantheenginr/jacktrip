@@ -62,21 +62,17 @@ QMutex JackAudioInterface::sJackMutex;
 
 //*******************************************************************************
 JackAudioInterface::JackAudioInterface(
-    JackTrip* jacktrip, int NumInChans, int NumOutChans,
+    QVarLengthArray<int> InputChans, QVarLengthArray<int> OutputChans,
 #ifdef WAIR  // wair
     int NumNetRevChans,
 #endif  // endwhere
-    AudioInterface::audioBitResolutionT AudioBitResolution, const QString& ClientName)
-    : AudioInterface(jacktrip, NumInChans, NumOutChans,
+    AudioInterface::audioBitResolutionT AudioBitResolution, bool processWithNetwork,
+    JackTrip* jacktrip, const QString& ClientName)
+    : AudioInterface(InputChans, OutputChans, MIX_UNSET,
 #ifdef WAIR  // wair
                      NumNetRevChans,
 #endif  // endwhere
-                     AudioBitResolution)
-    , mNumInChans(NumInChans)
-    , mNumOutChans(NumOutChans)
-#ifdef WAIR  // WAIR
-    , mNumNetRevChans(NumNetRevChans)
-#endif  // endwhere
+                     AudioBitResolution, processWithNetwork, jacktrip)
     , mClient(NULL)
     , mClientName(ClientName)
     , mBroadcast(false)
@@ -87,10 +83,10 @@ JackAudioInterface::JackAudioInterface(
 JackAudioInterface::~JackAudioInterface() {}
 
 //*******************************************************************************
-void JackAudioInterface::setup()
+void JackAudioInterface::setup(bool verbose)
 {
     setupClient();
-    AudioInterface::setup();
+    AudioInterface::setup(verbose);
     setProcessCallback();
 }
 
@@ -111,6 +107,9 @@ void JackAudioInterface::setupClient()
     // was  jack_options_t options = JackNoStartServer;
     // and then jack_options_t options = JackLoadName;
     jack_options_t options = JackNullOption;  // from jackSimpleClient example
+    if (mJackTrip == nullptr) {
+        options = JackNoStartServer;
+    }
     jack_status_t status;
 
     // Try to connect to the server
@@ -153,7 +152,7 @@ void JackAudioInterface::setupClient()
     }
 
     // Set function to call if Jack shuts down
-    jack_on_shutdown(mClient, this->jackShutdown, 0);
+    jack_on_info_shutdown(mClient, this->jackShutdown, 0);
 
     // Create input and output channels
     createChannels();
@@ -238,7 +237,7 @@ void JackAudioInterface::setProcessCallback()
 }
 
 //*******************************************************************************
-int JackAudioInterface::startProcess() const
+int JackAudioInterface::startProcess()
 {
     // Tell the JACK server that we are ready to roll.  Our
     // process() callback will start running now.
@@ -250,7 +249,7 @@ int JackAudioInterface::startProcess() const
 }
 
 //*******************************************************************************
-int JackAudioInterface::stopProcess() const
+int JackAudioInterface::stopProcess()
 {
     QMutexLocker locker(&sJackMutex);
     int code = (jack_deactivate(mClient));
@@ -267,14 +266,12 @@ int JackAudioInterface::stopProcess() const
 }
 
 //*******************************************************************************
-void JackAudioInterface::jackShutdown(void*)
+void JackAudioInterface::jackShutdown(jack_status_t /*code*/, const char* reason,
+                                      void* /*arg*/)
 {
-    // std::cout << "The Jack Server was shut down!" << std::endl;
+    std::cout << reason << std::endl;
     JackTrip::sJackStopped = true;
     std::cout << "The Jack Server was shut down!" << std::endl;
-    // throw std::runtime_error("The Jack Server was shut down!");
-    // std::cout << "Exiting program..." << std::endl;
-    // std::exit(1);
 }
 
 //*******************************************************************************

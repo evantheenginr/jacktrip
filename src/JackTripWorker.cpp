@@ -58,12 +58,14 @@ using std::endl;
 //*******************************************************************************
 JackTripWorker::JackTripWorker(UdpHubListener* udphublistener, int BufferQueueLength,
                                JackTrip::underrunModeT UnderRunMode,
+                               AudioInterface::audioBitResolutionT AudioBitResolution,
                                const QString& clientName)
     : mAppendThreadID(false)
     , mSleepTime(100)
     , mUdpHubListener(udphublistener)
     , mBufferQueueLength(BufferQueueLength)
     , mUnderRunMode(UnderRunMode)
+    , mAudioBitResolution(AudioBitResolution)
     , mClientName(clientName)
 {
     // mNetks = new NetKS;
@@ -123,8 +125,9 @@ void JackTripWorker::setJackTrip(int id, const QString& client_address,
     //        qDebug() << "is WAIR?" <<  tmp ;
     qDebug() << "mNumNetRevChans" << mNumNetRevChans;
 
-    mJackTrip.reset(new JackTrip(JackTrip::SERVERPINGSERVER, JackTrip::UDP, 1, 1,
-                                 mNumNetRevChans, FORCEBUFFERQ));
+    mJackTrip.reset(new JackTrip(JackTrip::SERVERPINGSERVER, JackTrip::UDP, 0, 1, 0, 1,
+                                 AudioInterface::MIX_UNSET, mNumNetRevChans,
+                                 FORCEBUFFERQ));
     // Add Plugins
     if (mWAIR) {
         cout << "Running in WAIR Mode..." << endl;
@@ -144,8 +147,8 @@ void JackTripWorker::setJackTrip(int id, const QString& client_address,
         }
     }
 #else   // endwhere
-    mJackTrip.reset(new JackTrip(JackTrip::SERVERPINGSERVER, JackTrip::UDP, 1, 1,
-                                 mBufferQueueLength));
+    mJackTrip.reset(new JackTrip(JackTrip::SERVERPINGSERVER, JackTrip::UDP, 0, 1, 0, 1,
+                                 AudioInterface::MIX_UNSET, mBufferQueueLength));
 #endif  // not wair
 #endif  // ifndef __JAMTEST__
 
@@ -167,8 +170,9 @@ void JackTripWorker::start()
 
     mJackTrip->setConnectDefaultAudioPorts(m_connectDefaultAudioPorts);
 
-    // Set our underrun mode
+    // Set our underrun mode and bit resolution
     mJackTrip->setUnderRunMode(mUnderRunMode);
+    mJackTrip->setAudioBitResolution(mAudioBitResolution);
     if (mIOStatTimeout > 0) {
         mJackTrip->setIOStatTimeout(mIOStatTimeout);
         mJackTrip->setIOStatStream(mIOStatStream);

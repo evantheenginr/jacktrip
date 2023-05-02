@@ -6,13 +6,16 @@ Item {
     width: parent.width; height: parent.height
     clip: true
 
-    property int fontBig: 28
+    property int fontBig: 20
     property int fontMedium: 13
     property int fontSmall: 11
-    
-    property int leftMargin: 48
+    property int fontExtraSmall: 8
+
     property int buttonWidth: 103
     property int buttonHeight: 25
+
+    property int leftMargin: 48
+    property int rightMargin: 16
 
     property string backgroundColour: virtualstudio.darkMode ? "#272525" : "#FAFBFB"
     property real imageLightnessValue: virtualstudio.darkMode ? 1.0 : 0.0
@@ -23,7 +26,10 @@ Item {
     property string buttonStroke: virtualstudio.darkMode ? "#80827D7D" : "#34979797"
     property string buttonHoverStroke: virtualstudio.darkMode ? "#7B7777" : "#BABCBC"
     property string buttonPressedStroke: virtualstudio.darkMode ? "#827D7D" : "#BABCBC"
-    property string saveButtonShadow: "#80A1A1A1"
+    property string sliderColour: virtualstudio.darkMode ? "#BABCBC" :  "#EAECEC"
+    property string sliderPressedColour: virtualstudio.darkMode ? "#ACAFAF" : "#DEE0E0"
+    property string sliderTrackColour: virtualstudio.darkMode ? "#5B5858" : "light gray"
+    property string sliderActiveTrackColour: virtualstudio.darkMode ? "light gray" : "black"
     property string saveButtonBackgroundColour: "#F2F3F3"
     property string saveButtonPressedColour: "#E7E8E8"
     property string saveButtonStroke: "#EAEBEB"
@@ -32,9 +38,11 @@ Item {
     property string saveButtonText: "#DB0A0A"
     property string checkboxStroke: "#0062cc"
     property string checkboxPressedStroke: "#007AFF"
+    property string disabledButtonText: "#D3D4D4"
+    property string linkText: virtualstudio.darkMode ? "#8B8D8D" : "#272525"
 
     property bool currShowWarnings: virtualstudio.showWarnings
-    property string warningScreen: virtualstudio.showWarnings ? "ethernet" : "acknowledged"
+    property string warningScreen: virtualstudio.showWarnings ? "ethernet" : ( permissions.micPermission == "unknown" ? "microphone" : "acknowledged")
 
     Item {
         id: ethernetWarningItem
@@ -57,7 +65,7 @@ Item {
             saturation: 0
             lightness: imageLightnessValue
         }
-        
+
         Text {
             id: ethernetWarningHeader
             text: "Connect via Wired Ethernet"
@@ -100,15 +108,8 @@ Item {
                 radius: 6 * virtualstudio.uiScale
                 color: okButtonEthernet.down ? saveButtonPressedColour : saveButtonBackgroundColour
                 border.width: 1
-                border.color: okButtonEthernet.down ? saveButtonPressedStroke : saveButtonStroke
+                border.color: okButtonEthernet.down || okButtonEthernet.hovered ? saveButtonPressedStroke : saveButtonStroke
                 layer.enabled: okButtonEthernet.hovered && !okButtonEthernet.down
-                layer.effect: DropShadow {
-                    horizontalOffset: 1 * virtualstudio.uiScale
-                    verticalOffset: 1 * virtualstudio.uiScale
-                    radius: 8.0 * virtualstudio.uiScale
-                    samples: 17
-                    color: saveButtonShadow
-                }
             }
             onClicked: { warningScreen = "headphones" }
             anchors.right: parent.right
@@ -141,7 +142,7 @@ Item {
                 x: showEthernetWarningCheckbox.leftPadding
                 y: parent.height / 2 - height / 2
                 radius: 3 * virtualstudio.uiScale
-                border.color: showEthernetWarningCheckbox.down ? checkboxPressedStroke : checkboxStroke
+                border.color: showEthernetWarningCheckbox.down || showEthernetWarningCheckbox.hovered  ? checkboxPressedStroke : checkboxStroke
 
                 Rectangle {
                     width: 10 * virtualstudio.uiScale
@@ -149,7 +150,7 @@ Item {
                     x: 3 * virtualstudio.uiScale
                     y: 3 * virtualstudio.uiScale
                     radius: 2 * virtualstudio.uiScale
-                    color: showEthernetWarningCheckbox.down ? checkboxPressedStroke : checkboxStroke
+                    color: showEthernetWarningCheckbox.down ||  showEthernetWarningCheckbox.hovered ? checkboxPressedStroke : checkboxStroke
                     visible: showEthernetWarningCheckbox.checked
                 }
             }
@@ -193,7 +194,7 @@ Item {
             saturation: 0
             lightness: imageLightnessValue
         }
-        
+
         Text {
             id: headphoneWarningHeader
             text: "Use Wired Headphones"
@@ -249,17 +250,16 @@ Item {
                 radius: 6 * virtualstudio.uiScale
                 color: okButtonHeadphones.down ? saveButtonPressedColour : saveButtonBackgroundColour
                 border.width: 1
-                border.color: okButtonHeadphones.down ? saveButtonPressedStroke : saveButtonStroke
+                border.color: okButtonHeadphones.down || okButtonHeadphones.hovered ? saveButtonPressedStroke : saveButtonStroke
                 layer.enabled: okButtonHeadphones.hovered && !okButtonHeadphones.down
-                layer.effect: DropShadow {
-                    horizontalOffset: 1 * virtualstudio.uiScale
-                    verticalOffset: 1 * virtualstudio.uiScale
-                    radius: 8.0 * virtualstudio.uiScale
-                    samples: 17
-                    color: saveButtonShadow
+            }
+            onClicked: {
+                if (permissions.micPermission == "unknown") {
+                    virtualstudio.showWarnings = currShowWarnings; warningScreen = "microphone"
+                } else {
+                    virtualstudio.showWarnings = currShowWarnings; warningScreen = "acknowledged"
                 }
             }
-            onClicked: { virtualstudio.showWarnings = currShowWarnings; warningScreen = "acknowledged" }
             anchors.right: parent.right
             anchors.rightMargin: 16 * virtualstudio.uiScale
             anchors.bottomMargin: 16 * virtualstudio.uiScale
@@ -290,7 +290,7 @@ Item {
                 x: showHeadphonesWarningCheckbox.leftPadding
                 y: parent.height / 2 - height / 2
                 radius: 3 * virtualstudio.uiScale
-                border.color: showHeadphonesWarningCheckbox.down ? checkboxPressedStroke : checkboxStroke
+                border.color: showHeadphonesWarningCheckbox.down || showHeadphonesWarningCheckbox.hovered ? checkboxPressedStroke : checkboxStroke
 
                 Rectangle {
                     width: 10 * virtualstudio.uiScale
@@ -298,7 +298,7 @@ Item {
                     x: 3 * virtualstudio.uiScale
                     y: 3 * virtualstudio.uiScale
                     radius: 2 * virtualstudio.uiScale
-                    color: showHeadphonesWarningCheckbox.down ? checkboxPressedStroke : checkboxStroke
+                    color: showHeadphonesWarningCheckbox.down || showHeadphonesWarningCheckbox.hovered ? checkboxPressedStroke : checkboxStroke
                     visible: showHeadphonesWarningCheckbox.checked
                 }
             }
@@ -315,120 +315,246 @@ Item {
     }
 
     Item {
+        id: requestMicPermissionsItem
+        width: parent.width; height: parent.height
+        visible: warningScreen == "microphone" && permissions.micPermission == "unknown"
+
+        Image {
+            id: microphonePrompt
+            source: "Prompt.svg"
+            width: 260
+            height: 250
+            y: 60
+            anchors.horizontalCenter: parent.horizontalCenter
+            sourceSize: Qt.size(microphonePrompt.width,microphonePrompt.height)
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+        }
+
+        Image {
+            id: micLogo
+            source: "logo.svg"
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: microphonePrompt.top
+            anchors.topMargin: 18 * virtualstudio.uiScale
+            width: 32 * virtualstudio.uiScale; height: 59 * virtualstudio.uiScale
+            sourceSize: Qt.size(micLogo.width,micLogo.height)
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+        }
+
+        Colorize {
+            anchors.fill: microphonePrompt
+            source: microphonePrompt
+            hue: 0
+            saturation: 0
+            lightness: imageLightnessValue
+        }
+
+        Button {
+            id: showPromptButton
+            width: 112 * virtualstudio.uiScale
+            height: 30 * virtualstudio.uiScale
+            background: Rectangle {
+                radius: 6 * virtualstudio.uiScale
+                color: showPromptButton.down ? saveButtonPressedColour : saveButtonBackgroundColour
+                border.width: 2
+                border.color: showPromptButton.down || showPromptButton.hovered ? saveButtonPressedStroke : saveButtonStroke
+                layer.enabled: showPromptButton.hovered && !showPromptButton.down
+            }
+            onClicked: {
+                permissions.getMicPermission();
+            }
+            anchors.right: microphonePrompt.right
+            anchors.rightMargin: 13.5 * virtualstudio.uiScale
+            anchors.bottomMargin: 17 * virtualstudio.uiScale
+            anchors.bottom: microphonePrompt.bottom
+            Text {
+                text: "OK"
+                font.pixelSize: 11 * virtualstudio.fontScale * virtualstudio.uiScale
+                font.weight: Font.Bold
+                color: saveButtonText
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.verticalCenter: parent.verticalCenter
+            }
+        }
+
+        Text {
+            id: micPermissionsHeader
+            text: "JackTrip needs your sounds!"
+            font { family: "Poppins"; weight: Font.Bold; pixelSize: fontMedium * virtualstudio.fontScale * virtualstudio.uiScale }
+            color: textColour
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: microphonePrompt.bottom
+            anchors.topMargin: 48 * virtualstudio.uiScale
+        }
+
+        Text {
+            id: micPermissionsSubheader1
+            text: "JackTrip requires permission to use your microphone."
+            font { family: "Poppins"; pixelSize: fontSmall * virtualstudio.fontScale * virtualstudio.uiScale }
+            color: textColour
+            width: 400
+            wrapMode: Text.Wrap
+            horizontalAlignment: Text.AlignHCenter
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: micPermissionsHeader.bottom
+            anchors.topMargin: 32 * virtualstudio.uiScale
+        }
+
+        Text {
+            id: micPermissionsSubheader2
+            text: "Click ‘OK’ to give JackTrip access to your microphone, instrument, or other audio device."
+            font { family: "Poppins"; pixelSize: fontSmall * virtualstudio.fontScale * virtualstudio.uiScale }
+            color: textColour
+            width: 400
+            wrapMode: Text.Wrap
+            horizontalAlignment: Text.AlignHCenter
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: micPermissionsSubheader1.bottom
+            anchors.topMargin: 24 * virtualstudio.uiScale
+        }
+    }
+
+    Item {
+        id: noMicItem
+        width: parent.width; height: parent.height
+        visible: (warningScreen == "acknowledged" || warningScreen == "microphone") && permissions.micPermission == "denied"
+
+        Image {
+            id: noMic
+            source: "micoff.svg"
+            width: 109.27
+            height: 170
+            y: 60
+            anchors.horizontalCenter: parent.horizontalCenter
+            sourceSize: Qt.size(noMic.width,noMic.height)
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+        }
+
+        Colorize {
+            anchors.fill: noMic
+            source: noMic
+            hue: 0
+            saturation: 0
+            lightness: imageLightnessValue
+        }
+
+        Button {
+            id: openSettingsButton
+            background: Rectangle {
+                radius: 6 * virtualstudio.uiScale
+                color: openSettingsButton.down ? saveButtonPressedColour : saveButtonBackgroundColour
+                border.width: 1
+                border.color: openSettingsButton.down || openSettingsButton.hovered ? saveButtonPressedStroke : saveButtonStroke
+                layer.enabled: openSettingsButton.hovered && !openSettingsButton.down
+            }
+            onClicked: {
+                permissions.openSystemPrivacy();
+            }
+            anchors.right: parent.right
+            anchors.rightMargin: 16 * virtualstudio.uiScale
+            anchors.bottomMargin: 16 * virtualstudio.uiScale
+            anchors.bottom: parent.bottom
+            width: 200 * virtualstudio.uiScale; height: 30 * virtualstudio.uiScale
+            Text {
+                text: "Open Privacy Settings"
+                font.family: "Poppins"
+                font.pixelSize: 11 * virtualstudio.fontScale * virtualstudio.uiScale
+                font.weight: Font.Bold
+                color: saveButtonText
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.verticalCenter: parent.verticalCenter
+            }
+        }
+
+        Text {
+            id: noMicHeader
+            text: "JackTrip can't hear you!"
+            font { family: "Poppins"; weight: Font.Bold; pixelSize: fontMedium * virtualstudio.fontScale * virtualstudio.uiScale }
+            color: textColour
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: noMic.bottom
+            anchors.topMargin: 48 * virtualstudio.uiScale
+        }
+
+        Text {
+            id: noMicSubheader1
+            text: "JackTrip requires permission to use your microphone."
+            font { family: "Poppins"; pixelSize: fontSmall * virtualstudio.fontScale * virtualstudio.uiScale }
+            color: textColour
+            width: 400
+            wrapMode: Text.Wrap
+            horizontalAlignment: Text.AlignHCenter
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: noMicHeader.bottom
+            anchors.topMargin: 32 * virtualstudio.uiScale
+        }
+
+        Text {
+            id: noMicSubheader2
+            text: "Click 'Open Privacy Settings' to give JackTrip permission to access your microphone, instrument, or other audio device."
+            font { family: "Poppins"; pixelSize: fontSmall * virtualstudio.fontScale * virtualstudio.uiScale }
+            color: textColour
+            width: 400
+            wrapMode: Text.Wrap
+            horizontalAlignment: Text.AlignHCenter
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: noMicSubheader1.bottom
+            anchors.topMargin: 24 * virtualstudio.uiScale
+        }
+    }
+
+    Item {
         id: setupItem
         width: parent.width; height: parent.height
-        visible: warningScreen == "acknowledged"
-    
+        visible: (warningScreen == "acknowledged" || warningScreen == "microphone") && permissions.micPermission == "granted"
+
+        property bool isUsingRtAudio: virtualstudio.audioBackend == "RtAudio"
+
         Text {
+            id: pageTitle
             x: 16 * virtualstudio.uiScale; y: 32 * virtualstudio.uiScale
             text: "Choose your audio devices"
             font { family: "Poppins"; weight: Font.Bold; pixelSize: fontBig * virtualstudio.fontScale * virtualstudio.uiScale }
             color: textColour
         }
-        
-        ComboBox {
-            id: backendCombo
-            model: backendComboModel
-            currentIndex: virtualstudio.audioBackend == "JACK" ? 0 : 1
-            onActivated: { virtualstudio.audioBackend = currentText }
-            x: 234 * virtualstudio.uiScale; y: 150 * virtualstudio.uiScale
-            width: parent.width - x - (16 * virtualstudio.uiScale); height: 36 * virtualstudio.uiScale
-            visible: virtualstudio.selectableBackend
-        }
-        
-        Text {
-            id: backendLabel
-            anchors.verticalCenter: backendCombo.verticalCenter
-            x: leftMargin * virtualstudio.uiScale
-            text: "Audio Backend"
-            font { family: "Poppins"; pixelSize: fontMedium * virtualstudio.fontScale * virtualstudio.uiScale }
-            visible: virtualstudio.selectableBackend
-            color: textColour
-        }
-        
-        Text {
-            id: jackLabel
-            x: leftMargin * virtualstudio.uiScale; y: 150 * virtualstudio.uiScale
-            width: parent.width - x - (16 * virtualstudio.uiScale)
-            text: "Using JACK for audio input and output. Use QjackCtl to adjust your sample rate, buffer, and device settings."
-            font { family: "Poppins"; pixelSize: fontMedium * virtualstudio.fontScale * virtualstudio.uiScale }
-            wrapMode: Text.WordWrap
-            visible: virtualstudio.audioBackend == "JACK" && !virtualstudio.selectableBackend
-            color: textColour
-        }
-        
-        ComboBox {
-            id: inputCombo
-            model: inputComboModel
-            currentIndex: virtualstudio.inputDevice
-            onActivated: { virtualstudio.inputDevice = currentIndex }
-            x: 234 * virtualstudio.uiScale; y: virtualstudio.uiScale * (virtualstudio.selectableBackend ? 198 : 150)
-            width: parent.width - x - (16 * virtualstudio.uiScale); height: 36 * virtualstudio.uiScale
-            visible: virtualstudio.audioBackend != "JACK"
-        }
-        
-        ComboBox {
-            id: outputCombo
-            model: outputComboModel
-            currentIndex: virtualstudio.outputDevice
-            onActivated: { virtualstudio.outputDevice = currentIndex }
-            x: backendCombo.x; y: inputCombo.y + (48 * virtualstudio.uiScale)
-            width: backendCombo.width; height: backendCombo.height
-            visible: virtualstudio.audioBackend != "JACK"
-        }
-        
-        Text {
-            id: inputLabel
-            anchors.verticalCenter: inputCombo.verticalCenter
-            x: leftMargin * virtualstudio.uiScale
-            text: "Input Device"
-            font { family: "Poppins"; pixelSize: fontMedium * virtualstudio.fontScale * virtualstudio.uiScale }
-            visible: virtualstudio.audioBackend != "JACK"
-            color: textColour
-        }
-        
-        Text {
-            id: outputLabel
-            anchors.verticalCenter: outputCombo.verticalCenter
-            x: leftMargin * virtualstudio.uiScale
-            text: "Output Device"
-            font { family: "Poppins"; pixelSize: fontMedium * virtualstudio.fontScale * virtualstudio.uiScale }
-            visible: virtualstudio.audioBackend != "JACK"
-            color: textColour
-        }
 
         Button {
             id: refreshButton
+            text: "Refresh Devices"
+            palette.buttonText: textColour
             background: Rectangle {
                 radius: 6 * virtualstudio.uiScale
                 color: refreshButton.down ? buttonPressedColour : (refreshButton.hovered ? buttonHoverColour : buttonColour)
                 border.width: 1
                 border.color: refreshButton.down ? buttonPressedStroke : (refreshButton.hovered ? buttonHoverStroke : buttonStroke)
             }
-            onClicked: { virtualstudio.refreshDevices() }
-            x: parent.width - (232 * virtualstudio.uiScale); y: inputCombo.y + (100 * virtualstudio.uiScale)
-            width: 216 * virtualstudio.uiScale; height: 30 * virtualstudio.uiScale
-            visible: virtualstudio.audioBackend != "JACK"
-            Text {
-                text: "Refresh Device List"
-                font { family: "Poppins"; pixelSize: fontSmall * virtualstudio.fontScale * virtualstudio.uiScale }
-                anchors { horizontalCenter: parent.horizontalCenter; verticalCenter: parent.verticalCenter }
-                color: textColour
+            icon {
+                source: "refresh.svg";
+                color: textColour;
             }
+            display: AbstractButton.TextBesideIcon
+            onClicked: {
+                virtualstudio.refreshDevices();
+            }
+            anchors.right: parent.right
+            anchors.rightMargin: rightMargin * virtualstudio.uiScale
+            anchors.verticalCenter: pageTitle.verticalCenter
+            width: 144 * virtualstudio.uiScale; height: 30 * virtualstudio.uiScale
+            font {
+                family: "Poppins"
+                pixelSize: fontExtraSmall * virtualstudio.fontScale * virtualstudio.uiScale
+            }
+            visible: parent.isUsingRtAudio
         }
 
-        Text {
-            anchors.left: outputLabel.left
-            anchors.right: outputCombo.right
-            anchors.leftMargin: 16 * virtualstudio.uiScale
-            anchors.rightMargin: 16 * virtualstudio.uiScale
-            y: inputCombo.y + (160 * virtualstudio.uiScale)
-            text: "JackTrip on Windows requires use of an audio device with ASIO drivers. If you do not see your device, you may need to install drivers from your manufacturer."
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
-            color: warningText
-            font { family: "Poppins"; pixelSize: fontSmall * virtualstudio.fontScale * virtualstudio.uiScale }
-            visible: Qt.platform.os == "windows" && virtualstudio.audioBackend != "JACK"
+        AudioSettings {
+            id: audioSettings
+            width: parent.width
+            anchors.top: pageTitle.bottom
+            anchors.topMargin: 24 * virtualstudio.uiScale
         }
 
         Button {
@@ -437,28 +563,21 @@ Item {
                 radius: 6 * virtualstudio.uiScale
                 color: saveButton.down ? saveButtonPressedColour : saveButtonBackgroundColour
                 border.width: 1
-                border.color: saveButton.down ? saveButtonPressedStroke : saveButtonStroke
-                layer.enabled: saveButton.hovered && !saveButton.down
-                layer.effect: DropShadow {
-                    horizontalOffset: 1 * virtualstudio.uiScale
-                    verticalOffset: 1 * virtualstudio.uiScale
-                    radius: 8.0 * virtualstudio.uiScale
-                    samples: 17
-                    color: saveButtonShadow
-                }
+                border.color: saveButton.down || saveButton.hovered ? saveButtonPressedStroke : saveButtonStroke
             }
-            onClicked: { window.state = "browse"; virtualstudio.applySettings() }
+            enabled: !Boolean(virtualstudio.devicesError) && virtualstudio.backendAvailable
+            onClicked: { virtualstudio.windowState = "browse"; virtualstudio.applySettings() }
             anchors.right: parent.right
-            anchors.rightMargin: 16 * virtualstudio.uiScale
-            anchors.bottomMargin: 16 * virtualstudio.uiScale
+            anchors.rightMargin: rightMargin * virtualstudio.uiScale
+            anchors.bottomMargin: rightMargin * virtualstudio.uiScale
             anchors.bottom: parent.bottom
             width: 150 * virtualstudio.uiScale; height: 30 * virtualstudio.uiScale
             Text {
-                text: "Save Settings"
+                text: virtualstudio.studioToJoin.toString() ? "Connect to Studio" : "Save Settings"
                 font.family: "Poppins"
                 font.pixelSize: fontSmall * virtualstudio.fontScale * virtualstudio.uiScale
                 font.weight: Font.Bold
-                color: saveButtonText
+                color: !Boolean(virtualstudio.devicesError) && virtualstudio.backendAvailable ? saveButtonText : disabledButtonText
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.verticalCenter: parent.verticalCenter
             }
@@ -467,6 +586,7 @@ Item {
         CheckBox {
             id: showAgainCheckbox
             checked: virtualstudio.showDeviceSetup
+            visible: virtualstudio.backendAvailable
             text: qsTr("Ask again next time")
             anchors.right: saveButton.left
             anchors.rightMargin: 16 * virtualstudio.uiScale
@@ -478,7 +598,7 @@ Item {
                 x: showAgainCheckbox.leftPadding
                 y: parent.height / 2 - height / 2
                 radius: 3 * virtualstudio.uiScale
-                border.color: showAgainCheckbox.down ? checkboxPressedStroke : checkboxStroke
+                border.color: showAgainCheckbox.down || showAgainCheckbox.hovered ? checkboxPressedStroke : checkboxStroke
 
                 Rectangle {
                     width: 10 * virtualstudio.uiScale
@@ -486,7 +606,7 @@ Item {
                     x: 3 * virtualstudio.uiScale
                     y: 3 * virtualstudio.uiScale
                     radius: 2 * virtualstudio.uiScale
-                    color: showAgainCheckbox.down ? checkboxPressedStroke : checkboxStroke
+                    color: showAgainCheckbox.down || showAgainCheckbox.hovered ? checkboxPressedStroke : checkboxStroke
                     visible: showAgainCheckbox.checked
                 }
             }

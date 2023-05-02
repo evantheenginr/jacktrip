@@ -8,7 +8,7 @@ Rectangle {
     width: 696
     height: 577
     color: backgroundColour
-    state: virtualstudio.showFirstRun ? "start" : "login"
+    state: virtualstudio.showFirstRun ? "start" : virtualstudio.windowState
     anchors.fill: parent
 
     id: window
@@ -125,24 +125,24 @@ Rectangle {
 
     Connections {
         target: virtualstudio
-        onAuthSucceeded: { 
+        function onAuthSucceeded() {
             if (virtualstudio.showDeviceSetup) {
-                window.state = "setup";
+                virtualstudio.windowState = "setup";
             } else {
-                window.state = "browse";
+                virtualstudio.windowState = "browse";
             }
         }
-        onAuthFailed: {
+        function onAuthFailed() {
             loginScreen.failTextVisible = true;
         }
-        onConnected: {
-            window.state = "connected";
+        function onConnected() {
+            virtualstudio.windowState = "connected";
         }
-        onFailed: {
-            window.state = "failed";
+        function onFailed() {
+            virtualstudio.windowState = "failed";
         }
-        onDisconnected: {
-            window.state = "browse";
+        function onDisconnected() {
+            virtualstudio.windowState = "browse";
         }
     }
 }

@@ -40,12 +40,14 @@
 
 #include <QObject>
 #include <QString>
+#include <QTimer>
 #include <QUuid>
 #include <QtNetworkAuth>
 #include <QtWebSockets>
 
 #include "../JackTrip.h"
 #include "../jacktrip_globals.h"
+#include "vsConstants.h"
 #include "vsPinger.h"
 #include "vsServerInfo.h"
 #include "vsWebSocket.h"
@@ -56,16 +58,21 @@ class VsDevice : public QObject
 
    public:
     // Constructor
-    explicit VsDevice(QOAuth2AuthorizationCodeFlow* authenticator,
+    explicit VsDevice(QOAuth2AuthorizationCodeFlow* authenticator, bool testMode,
                       QObject* parent = nullptr);
 
     // Public functions
     void registerApp();
     void removeApp();
     void sendHeartbeat();
+    bool reconnect();
+    void setReconnect(bool reconnect);
+    bool hasTerminated();
     void setServerId(QString studioID);
     JackTrip* initJackTrip(bool useRtAudio, std::string input, std::string output,
-                           int bufferSize, VsServerInfo* studioInfo);
+                           int baseInputChannel, int numChannelsIn, int baseOutputChannel,
+                           int numChannelsOut, int inputMixMode, int bufferSize,
+                           int bufferStrategy, VsServerInfo* studioInfo);
     void startJackTrip();
     void stopJackTrip();
     void reconcileAgentConfig(QJsonDocument newState);
@@ -75,14 +82,26 @@ class VsDevice : public QObject
 
    signals:
     void updateNetworkStats(QJsonObject stats);
+    void updatedCaptureVolumeFromServer(float multiplier);
+    void updatedCaptureMuteFromServer(bool muted);
+    void updatedPlaybackVolumeFromServer(float multiplier);
+    void updatedPlaybackMuteFromServer(bool muted);
+
+   public slots:
+    void updateCaptureVolume(float multiplier);
+    void updateCaptureMute(bool muted);
+    void updatePlaybackVolume(float multiplier);
+    void updatePlaybackMute(bool muted);
 
    private slots:
     void terminateJackTrip();
     void onTextMessageReceived(const QString& message);
+    void sendLevels();
 
    private:
     void registerJTAsDevice();
     bool enabled();
+    int selectBindPort();
     QString randomString(int stringLength);
 
     VsPinger* m_pinger = NULL;
@@ -92,11 +111,18 @@ class VsDevice : public QObject
     QString m_token;
     QString m_apiPrefix;
     QString m_apiSecret;
+    QString m_apiHost = PROD_API_HOST;
     QJsonObject m_deviceAgentConfig;
     VsWebSocket* m_webSocket = NULL;
     QScopedPointer<JackTrip> m_jackTrip;
     QOAuth2AuthorizationCodeFlow* m_authenticator;
     QRandomGenerator m_randomizer;
+    float m_captureVolume  = 1.0;
+    bool m_captureMute     = false;
+    float m_playbackVolume = 1.0;
+    bool m_playbackMute    = false;
+    QTimer* m_sendVolumeTimer;
+    bool m_reconnect = false;
 };
 
 #endif  // VSDEVICE_H

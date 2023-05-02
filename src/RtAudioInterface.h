@@ -40,7 +40,10 @@
 
 #include <RtAudio.h>
 
+#include <QQueue>
+
 #include "AudioInterface.h"
+#include "StereoToMono.h"
 #include "jacktrip_globals.h"
 class JackTrip;  // Forward declaration
 
@@ -49,26 +52,31 @@ class RtAudioInterface : public AudioInterface
 {
    public:
     /** \brief The class constructor
-     * \param jacktrip Pointer to the JackTrip class that connects all classes (mediator)
      * \param NumInChans Number of Input Channels
      * \param NumOutChans Number of Output Channels
      * \param AudioBitResolution Audio Sample Resolutions in bits
+     * \param processWithNetwork Send audio to and from the network
+     * \param jacktrip Pointer to the JackTrip class that connects all classes (mediator)
      */
-    RtAudioInterface(JackTrip* jacktrip, int NumInChans = gDefaultNumInChannels,
-                     int NumOutChans                        = gDefaultNumOutChannels,
-                     audioBitResolutionT AudioBitResolution = BIT16);
+    RtAudioInterface(QVarLengthArray<int> InputChans, QVarLengthArray<int> OutputChans,
+                     inputMixModeT InputMixMode             = AudioInterface::MIX_UNSET,
+                     audioBitResolutionT AudioBitResolution = BIT16,
+                     bool processWithNetwork = false, JackTrip* jacktrip = nullptr);
     /// \brief The class destructor
     virtual ~RtAudioInterface();
 
     /// \brief List all available audio interfaces, with its properties
-    virtual void listAllInterfaces();
     static void printDevices();
-    virtual int getDeviceIdFromName(std::string deviceName, bool isInput);
-    virtual void setup();
-    virtual int startProcess() const;
-    virtual int stopProcess() const;
+    virtual void setup(bool verbose = true);
+    virtual int startProcess();
+    virtual int stopProcess();
     /// \brief This has no effect in RtAudio
     virtual void connectDefaultPorts() {}
+
+    static void getDeviceList(QStringList* list, QStringList* categories,
+                              QList<int>* channels, bool isInput);
+    static void getDeviceInfoFromName(std::string deviceName, int* index,
+                                      std::string* api, bool isInput);
 
     //--------------SETTERS---------------------------------------------
     /// \brief This has no effect in RtAudio
@@ -84,16 +92,19 @@ class RtAudioInterface : public AudioInterface
     static int wrapperRtAudioCallback(void* outputBuffer, void* inputBuffer,
                                       unsigned int nFrames, double streamTime,
                                       RtAudioStreamStatus status, void* userData);
-    void printDeviceInfo(unsigned int deviceId);
+    static void RtAudioErrorCallback(RtAudioError::Type type,
+                                     const std::string& errorText);
+    void printDeviceInfo(std::string api, unsigned int deviceId);
 
-    int mNumInChans;   ///< Number of Input Channels
-    int mNumOutChans;  ///<  Number of Output Channels
     QVarLengthArray<float*>
         mInBuffer;  ///< Vector of Input buffers/channel read from JACK
     QVarLengthArray<float*>
         mOutBuffer;     ///< Vector of Output buffer/channel to write to JACK
-    RtAudio* mRtAudio;  ///< RtAudio class
-    unsigned int getDefaultDevice(bool isInput);
+    RtAudio* mRtAudio;  ///< RtAudio class if the input and output device are the same
+
+    unsigned int getDefaultDeviceForLinuxPulseAudio(bool isInput);
+
+    StereoToMono* mStereoToMonoMixer = NULL;
 };
 
 #endif  // __RTAUDIOINTERFACE_H__

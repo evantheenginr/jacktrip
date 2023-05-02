@@ -53,9 +53,11 @@
 #include <QDateTime>
 #include <QHostAddress>
 #include <QHostInfo>
+#include <QRandomGenerator>
 #include <QThread>
 #include <QTimer>
 #include <QtEndian>
+#include <QtGlobal>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -80,7 +82,8 @@ bool JackTrip::sJackStopped = false;
 
 //*******************************************************************************
 JackTrip::JackTrip(jacktripModeT JacktripMode, dataProtocolT DataProtocolType,
-                   int NumChansIn, int NumChansOut,
+                   int BaseChanIn, int NumChansIn, int BaseChanOut, int NumChansOut,
+                   AudioInterface::inputMixModeT InputMixMode,
 #ifdef WAIR  // WAIR
                    int NumNetRevChans,
 #endif  // endwhere
@@ -95,8 +98,11 @@ JackTrip::JackTrip(jacktripModeT JacktripMode, dataProtocolT DataProtocolType,
     , mDataProtocol(DataProtocolType)
     , mPacketHeaderType(PacketHeaderType)
     , mAudiointerfaceMode(JackTrip::JACK)
+    , mBaseAudioChanIn(BaseChanIn)
     , mNumAudioChansIn(NumChansIn)
+    , mBaseAudioChanOut(BaseChanOut)
     , mNumAudioChansOut(NumChansOut)
+    , mInputMixMode(InputMixMode)
 #ifdef WAIR  // WAIR
     , mNumNetRevChans(NumNetRevChans)
 #endif  // endwhere
@@ -124,6 +130,8 @@ JackTrip::JackTrip(jacktripModeT JacktripMode, dataProtocolT DataProtocolType,
     , mUseAuth(false)
     , mRedundancy(redundancy)
     , mTimeoutTimer(this)
+    , mRetryTimer(this)
+    , mRetries(0)
     , mSleepTime(100)
     , mElapsedTime(0)
     , mEndTime(0)
@@ -181,12 +189,21 @@ void JackTrip::setupAudio(
         if (gVerboseFlag)
             std::cout << "  JackTrip:setupAudio before new JackAudioInterface"
                       << std::endl;
-        mAudioInterface =
-            new JackAudioInterface(this, mNumAudioChansIn, mNumAudioChansOut,
+        QVarLengthArray<int> inputChannels;
+        QVarLengthArray<int> outputChannels;
+        inputChannels.resize(mNumAudioChansIn);
+        outputChannels.resize(mNumAudioChansOut);
+        for (int i = 0; i < mNumAudioChansIn; i++) {
+            inputChannels[i] = 1 + i;
+        }
+        for (int i = 0; i < mNumAudioChansOut; i++) {
+            outputChannels[i] = 1 + i;
+        }
+        mAudioInterface = new JackAudioInterface(inputChannels, outputChannels,
 #ifdef WAIR  // wair
-                                   mNumNetRevChans,
+                                                 mNumNetRevChans,
 #endif  // endwhere
-                                   mAudioBitResolution);
+                                                 mAudioBitResolution, true, this);
 
 #ifdef WAIRTOHUB  // WAIR
 
@@ -211,7 +228,7 @@ void JackTrip::setupAudio(
         if (gVerboseFlag)
             std::cout << "  JackTrip:setupAudio before mAudioInterface->setup"
                       << std::endl;
-        mAudioInterface->setup();
+        mAudioInterface->setup(true);
         if (gVerboseFlag)
             std::cout << "  JackTrip:setupAudio before mAudioInterface->getSampleRate"
                       << std::endl;
@@ -229,34 +246,66 @@ void JackTrip::setupAudio(
 #ifdef NO_JACK  /// \todo FIX THIS REPETITION OF CODE
 #ifdef RT_AUDIO
         cout << "Warning: using non jack version, RtAudio will be used instead" << endl;
-        mAudioInterface = new RtAudioInterface(this, mNumAudioChansIn, mNumAudioChansOut,
-                                               mAudioBitResolution);
+        QVarLengthArray<int> inputChannels;
+        QVarLengthArray<int> outputChannels;
+        inputChannels.resize(mNumAudioChansIn);
+        outputChannels.resize(mNumAudioChansOut);
+        for (int i = 0; i < mNumAudioChansIn; i++) {
+            inputChannels[i] = mBaseAudioChanIn + i;
+        }
+        for (int i = 0; i < mNumAudioChansOut; i++) {
+            outputChannels[i] = mBaseAudioChanOut + i;
+        }
+        mAudioInterface =
+            new RtAudioInterface(inputChannels, outputChannels, mInputMixMode,
+                                 mAudioBitResolution, true, this);
         mAudioInterface->setSampleRate(mSampleRate);
         mAudioInterface->setDeviceID(mDeviceID);
         mAudioInterface->setInputDevice(mInputDeviceName);
         mAudioInterface->setOutputDevice(mOutputDeviceName);
         mAudioInterface->setBufferSizeInSamples(mAudioBufferSize);
-        mAudioInterface->setup();
+        mAudioInterface->setup(true);
         // Setup might have reduced number of channels
+
+        // TODO: Add check for if base input channel needs to change
         mNumAudioChansIn  = mAudioInterface->getNumInputChannels();
         mNumAudioChansOut = mAudioInterface->getNumOutputChannels();
+        if (mNumAudioChansIn == 2 && mInputMixMode == AudioInterface::MIXTOMONO) {
+            mNumAudioChansIn = 1;
+        }
         // Setup might have changed buffer size
         mAudioBufferSize = mAudioInterface->getBufferSizeInSamples();
 #endif
 #endif
     } else if (mAudiointerfaceMode == JackTrip::RTAUDIO) {
 #ifdef RT_AUDIO
-        mAudioInterface = new RtAudioInterface(this, mNumAudioChansIn, mNumAudioChansOut,
-                                               mAudioBitResolution);
+        QVarLengthArray<int> inputChannels;
+        QVarLengthArray<int> outputChannels;
+        inputChannels.resize(mNumAudioChansIn);
+        outputChannels.resize(mNumAudioChansOut);
+        for (int i = 0; i < mNumAudioChansIn; i++) {
+            inputChannels[i] = mBaseAudioChanIn + i;
+        }
+        for (int i = 0; i < mNumAudioChansOut; i++) {
+            outputChannels[i] = mBaseAudioChanOut + i;
+        }
+        mAudioInterface =
+            new RtAudioInterface(inputChannels, outputChannels, mInputMixMode,
+                                 mAudioBitResolution, true, this);
         mAudioInterface->setSampleRate(mSampleRate);
         mAudioInterface->setDeviceID(mDeviceID);
         mAudioInterface->setInputDevice(mInputDeviceName);
         mAudioInterface->setOutputDevice(mOutputDeviceName);
         mAudioInterface->setBufferSizeInSamples(mAudioBufferSize);
-        mAudioInterface->setup();
+        mAudioInterface->setup(true);
         // Setup might have reduced number of channels
+
+        // TODO: Add check for if base input channel needs to change
         mNumAudioChansIn  = mAudioInterface->getNumInputChannels();
         mNumAudioChansOut = mAudioInterface->getNumOutputChannels();
+        if (mNumAudioChansIn == 2 && mInputMixMode == AudioInterface::MIXTOMONO) {
+            mNumAudioChansIn = 1;
+        }
         // Setup might have changed buffer size
         mAudioBufferSize = mAudioInterface->getBufferSizeInSamples();
 #endif
@@ -376,14 +425,15 @@ void JackTrip::setupRingBuffers()
             mReceiveRingBuffer =
                 new RingBuffer(audio_output_slot_size, mBufferQueueLength);
             mPacketHeader->setBufferRequiresSameSettings(true);
-        } else if (mBufferStrategy == 3) {
+        } else if ((mBufferStrategy == 3) || (mBufferStrategy == 4)) {
+            bool use_worker_thread = (mBufferStrategy == 3);
             cout << "Using experimental buffer strategy " << mBufferStrategy
-                 << "-- Regulator with PLC" << endl;
-
-            mReceiveRingBuffer =
-                new Regulator(mNumAudioChansOut, mAudioBitResolution, mAudioBufferSize,
-                              mBufferQueueLength, mBroadcastQueueLength);
-            // bufStrategy 3, mBufferQueueLength is in integer msec not packets
+                 << "-- Regulator with PLC (worker="
+                 << (use_worker_thread ? "true" : "false") << ")" << endl;
+            mReceiveRingBuffer = new Regulator(mNumAudioChansOut, mAudioBitResolution,
+                                               mAudioBufferSize, mBufferQueueLength,
+                                               use_worker_thread, mBroadcastQueueLength);
+            // bufStrategy 3 or 4, mBufferQueueLength is in integer msec not packets
 
             mPacketHeader->setBufferRequiresSameSettings(false);  // = asym is default
 
@@ -459,11 +509,23 @@ void JackTrip::startProcess(
         // qDebug() << "before mJackTrip->startProcess" << mReceiverBindPort<<
         // mSenderBindPort;
 #endif
-    checkIfPortIsBinded(mReceiverBindPort);
+    if (checkIfPortIsBinded(mReceiverBindPort)) {
+        stop(QStringLiteral("Could not bind %1 UDP socket. It may already be binded by "
+                            "another process on "
+                            "your machine. Try using a different port number")
+                 .arg(mReceiverBindPort));
+        return;
+    }
     if (gVerboseFlag)
         std::cout << "  JackTrip:startProcess before checkIfPortIsBinded(mSenderBindPort)"
                   << std::endl;
-    checkIfPortIsBinded(mSenderBindPort);
+    if (checkIfPortIsBinded(mSenderBindPort)) {
+        stop(QStringLiteral("Could not bind %1 UDP socket. It may already be binded by "
+                            "another process on "
+                            "your machine. Try using a different port number")
+                 .arg(mSenderBindPort));
+        return;
+    }
     // Set all classes and parameters
     // ------------------------------
     if (gVerboseFlag)
@@ -473,6 +535,14 @@ void JackTrip::startProcess(
         ID
 #endif  // endwhere
     );
+
+    QString audioInterfaceError =
+        QString::fromStdString(mAudioInterface->getDevicesErrorMsg());
+    if (audioInterfaceError != "") {
+        stop(audioInterfaceError);
+        return;
+    }
+
     // cc redundant with instance creator  createHeader(mPacketHeaderType); next line
     // fixme
     createHeader(mPacketHeaderType);
@@ -588,10 +658,12 @@ void JackTrip::completeConnection()
     for (auto& i : mProcessPluginsFromNetwork) {
         mAudioInterface->appendProcessPluginFromNetwork(i);
     }
+
     for (auto& i : mProcessPluginsToNetwork) {
         mAudioInterface->appendProcessPluginToNetwork(i);
     }
-    mAudioInterface->initPlugins();   // mSampleRate known now, which plugins require
+
+    mAudioInterface->initPlugins(true);  // mSampleRate known now, which plugins require
     mAudioInterface->startProcess();  // Tell JACK server we are ready for audio flow now
 
     if (mConnectDefaultAudioPorts) {
@@ -743,7 +815,7 @@ void JackTrip::receivedConnectionTCP()
             return;
         }
         mAwaitingTcp = false;
-        mTimeoutTimer.stop();
+        mRetryTimer.stop();
     }
     if (gVerboseFlag)
         cout << "TCP Socket Connected to Server!" << endl;
@@ -907,6 +979,15 @@ void JackTrip::receivedDataTCP()
     completeConnection();
 }
 
+void JackTrip::receivedErrorTCP(QAbstractSocket::SocketError socketError)
+{
+    if (socketError != QAbstractSocket::ConnectionRefusedError) {
+        mTcpClient.close();
+        mRetryTimer.stop();
+        stop(QStringLiteral("TCP Socket Error: ") + QString::number(socketError));
+    }
+}
+
 void JackTrip::connectionSecured()
 {
     // Now that the connection is encrypted, send out port, and credentials.
@@ -1056,18 +1137,51 @@ void JackTrip::tcpTimerTick()
         // Stop everything.
         mAwaitingTcp = false;
         mTcpClient.close();
-        mTimeoutTimer.stop();
+        mRetryTimer.stop();
         stop();
+        return;
     }
 
-    mElapsedTime += mSleepTime;
+    mElapsedTime += mRetryTimer.interval();
     if (mEndTime > 0 && mElapsedTime >= mEndTime) {
         mAwaitingTcp = false;
         mTcpClient.close();
-        mTimeoutTimer.stop();
+        mRetryTimer.stop();
         cout << "JackTrip Server Timed Out!" << endl;
         stop(QStringLiteral("Initial TCP Connection Timed Out"));
+        return;
     }
+
+    // Use randomized exponential backoff to reconnect the TCP client
+    QRandomGenerator randomizer;
+    mRetries++;
+    // exponential backoff sleep with 6s maximum + jitter
+    int newInterval = 2000 * pow(2, mRetries);
+    newInterval     = std::min(newInterval, 6000);
+    newInterval += randomizer.bounded(0, 500);
+    QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
+    qDebug() << "Sleep time " << newInterval << " ms at " << now;
+    mRetryTimer.setInterval(newInterval);
+
+    qDebug() << "Connection timed out. Retrying again using exponential backoff";
+
+    mTcpClient.abort();
+
+    // Create Socket Objects
+    QHostAddress serverHostAddress;
+    if (!serverHostAddress.setAddress(mPeerAddress)) {
+        QHostInfo info = QHostInfo::fromName(mPeerAddress);
+        if (!info.addresses().isEmpty()) {
+            // use the first IP address
+            serverHostAddress = info.addresses().constFirst();
+        }
+    }
+
+    if (mTcpClient.state() == QAbstractSocket::UnconnectedState) {
+        mTcpClient.connectToHost(serverHostAddress, mTcpServerPort);
+    }
+
+    mRetryTimer.start();
 }
 
 //*******************************************************************************
@@ -1247,17 +1361,31 @@ int JackTrip::clientPingToServerStart()
     // ----------------------------------------------
     connect(&mTcpClient, &QTcpSocket::readyRead, this, &JackTrip::receivedDataTCP);
     connect(&mTcpClient, &QTcpSocket::connected, this, &JackTrip::receivedConnectionTCP);
+    // Enable CI builds on Ubuntu 20.04 with Qt 5.12.8
+#if QT_VERSION < QT_VERSION_CHECK(5, 13, 0)
+    connect(&mTcpClient,
+            QOverload<QAbstractSocket::SocketError>::of(&QAbstractSocket::error), this,
+            &JackTrip::receivedErrorTCP);
+#else
+    connect(&mTcpClient, &QTcpSocket::errorOccurred, this, &JackTrip::receivedErrorTCP);
+#endif
     {
         QMutexLocker lock(&mTimerMutex);
+        QRandomGenerator randomizer;
         mAwaitingTcp = true;
         mElapsedTime = 0;
-        mEndTime     = 5000;  // Timeout after 5 seconds.
-        mTimeoutTimer.setInterval(mSleepTime);
-        mTimeoutTimer.disconnect();
-        connect(&mTimeoutTimer, &QTimer::timeout, this, &JackTrip::tcpTimerTick);
-        mTimeoutTimer.start();
+        mEndTime     = 30000;  // Timeout after 30 seconds.
+        mRetryTimer.setInterval(randomizer.bounded(
+            static_cast<int>(0), static_cast<int>(2000 * pow(2, mRetries))));
+        mRetryTimer.setSingleShot(true);
+        mRetryTimer.disconnect();
+        connect(&mRetryTimer, &QTimer::timeout, this, &JackTrip::tcpTimerTick);
+        mRetryTimer.start();
     }
-    mTcpClient.connectToHost(serverHostAddress, mTcpServerPort);
+
+    if (mTcpClient.state() == QAbstractSocket::UnconnectedState) {
+        mTcpClient.connectToHost(serverHostAddress, mTcpServerPort);
+    }
 
     if (gVerboseFlag)
         cout << "Connecting to TCP Server at "
@@ -1442,17 +1570,27 @@ bool JackTrip::checkPeerSettings(int8_t* full_packet)
 }
 
 //*******************************************************************************
-void JackTrip::checkIfPortIsBinded(int port)
+bool JackTrip::checkIfPortIsBinded(int port)
 {
     QUdpSocket UdpSockTemp;  // Create socket to wait for client
     // Bind the socket
     // cc        if ( !UdpSockTemp.bind(QHostAddress::AnyIPv4, port,
     // QUdpSocket::DontShareAddress) )
-    if (!UdpSockTemp.bind(QHostAddress::Any, port, QUdpSocket::DontShareAddress)) {
-        UdpSockTemp.close();  // close the socket
-        throw std::runtime_error(
-            "Could not bind UDP socket. It may already be binded by another process on "
-            "your machine. Try using a different port number");
+
+    // check all combinations to ensure the port is free
+    std::map<std::string, QHostAddress::SpecialAddress> interfaces = {
+        {"IPv4", QHostAddress::AnyIPv4},
+        {"IPv6", QHostAddress::AnyIPv6},
+        {"IPv4+IPv6", QHostAddress::Any}};
+
+    std::map<std::string, QHostAddress::SpecialAddress>::iterator it;
+    for (it = interfaces.begin(); it != interfaces.end(); it++) {
+        bool binded = UdpSockTemp.bind(it->second, port, QUdpSocket::DontShareAddress);
+        if (!binded) {
+            UdpSockTemp.close();  // close the socket
+            return true;
+        }
+        UdpSockTemp.close();
     }
-    UdpSockTemp.close();  // close the socket
+    return false;
 }
