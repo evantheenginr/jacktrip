@@ -123,10 +123,10 @@ void Patcher::registerClient(const QString& clientName)
                 if (m_fan) {
                     if (m_clients.contains(otherClient) && otherChannel == channel) {
                         jack_connect(m_jackClient, clientOutPorts.at(i), inPorts[j]);
-                    } else if (m_steroUpmix && clientIsMono) {
+                    } else if (m_steroUpmix /*&& clientIsMono*/) {
                         // Deal with the special case of stereo upmix
                         if (m_clients.contains(otherClient)
-                            && otherChannel == QLatin1String("2")) {
+                            /*&& otherChannel == QLatin1String("2")*/) {
                             jack_connect(m_jackClient, clientOutPorts.at(i), inPorts[j]);
                         }
                     }
@@ -160,8 +160,8 @@ void Patcher::registerClient(const QString& clientName)
                     if (m_clients.contains(otherClient)
                         && !QString(outPorts[j]).contains(QLatin1String("broadcast"))) {
                         if (otherChannel == channel
-                            || (m_steroUpmix && channel == QLatin1String("2")
-                                && m_monoClients.contains(otherClient))) {
+                            || (m_steroUpmix /*&& channel == QLatin1String("2")
+                                && m_monoClients.contains(otherClient)*/)) {
                             jack_connect(m_jackClient, outPorts[j], clientInPorts.at(i));
                         }
                     }

@@ -634,7 +634,7 @@ void Regulator::sampleToBits(sample_t sample, int ch, int frame)
 bool BurgAlgorithm::classify(double d)
 {
     bool tmp = false;
-    switch (fpclassify(d)) {
+    switch (std::fpclassify(d)) {
     case FP_INFINITE:
         qDebug() << ("infinite");
         tmp = true;
