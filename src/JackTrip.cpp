@@ -780,12 +780,12 @@ void JackTrip::onStatTimer()
                          << "\"autoq_rate\":" << 0.1 * recv_io_stat.autoq_rate
                          << "}" << endl;
     }else {  // bufstrategy 3
+#define INVFLOATFACTOR 0.001
         mIOStatLogStream
-            << now.toLocal8Bit().constData() << " "
+            /*<< now.toLocal8Bit().constData() << " "
             << getPeerAddress().toLocal8Bit().constData()
             << " send: " << send_io_stat.underruns << "/" << send_io_stat.overflows
             << " Glitches: " << recv_io_stat.underruns  // pullStat->lastPlcUnderruns;
-#define INVFLOATFACTOR 0.001
             << "\nPUSH -- SD avg/last: " << setw(5)
             << INVFLOATFACTOR * recv_io_stat.overflows  // pushStat->longTermStdDev;
             << " / " << setw(5)
@@ -826,7 +826,31 @@ void JackTrip::onStatTimer()
             //                     << " autoq: " << 0.1 * recv_io_stat.autoq_corr << "/"
             //                     << 0.1 * recv_io_stat.autoq_rate
             << "\n"
-            << endl;
+            << endl;*/
+            << "{"
+            << "\"interval\":" << mIOStatTimeout << ","
+            << "\"time\":\"" << now.toLocal8Bit().constData() << "\","
+            << "\"remote_client_name\":\"" << mJackClientName.toLocal8Bit().constData() << "\","
+            << "\"peer\":\"" << getPeerAddress().toLocal8Bit().constData() << "\","
+            << "\"send_underruns\":" << send_io_stat.underruns << ","
+            << "\"send_overflows\":" << send_io_stat.overflows << ","
+            << "\"recv_underruns\":" << recv_io_stat.underruns << ","
+            << "\"recv_overflows\":" << recv_io_stat.overflows << ","
+            << "\"recv_glitches\":" << recv_io_stat.underruns << ","
+            << "\"push_sd_avg\":" << INVFLOATFACTOR * recv_io_stat.overflows << ","
+            << "\"push_sd_last\":" << INVFLOATFACTOR * recv_io_stat.buf_dec_overflows << ","
+            << "\"push_mean\":" << INVFLOATFACTOR * recv_io_stat.skew << ","
+            << "\"push_min\":" << INVFLOATFACTOR * recv_io_stat.skew_raw << ","
+            << "\"push_max\":" << INVFLOATFACTOR * recv_io_stat.level << ","
+            << "\"pull_sd_avg\":" << INVFLOATFACTOR * recv_io_stat.buf_dec_pktloss << ","
+            << "\"pull_sd_last\":" << INVFLOATFACTOR * recv_io_stat.broadcast_delta << ","
+            << "\"pull_mean\":" << INVFLOATFACTOR * recv_io_stat.buf_inc_underrun << ","
+            << "\"pull_min\":" << INVFLOATFACTOR * recv_io_stat.buf_inc_compensate << ","
+            << "\"pull_max\":" << INVFLOATFACTOR * recv_io_stat.broadcast_skew << ","
+            << "\"prot_tot\":" << pkt_stat.tot << ","
+            << "\"autoq_corr\":" << 0.1 * recv_io_stat.autoq_corr << ","
+            << "\"autoq_rate\":" << 0.1 * recv_io_stat.autoq_rate
+            << "}" << endl;
     }
 }
 
