@@ -28,6 +28,7 @@
 
 #include <QByteArray>
 #include <QCloseEvent>
+#include <QGridLayout>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMutex>
@@ -38,8 +39,10 @@
 #include <QTemporaryFile>
 
 #include "../JackTrip.h"
+#include "../Settings.h"
 #include "../UdpHubListener.h"
 #include "messageDialog.h"
+#include "vuMeter.h"
 
 #ifdef __APPLE__
 #include "NoNap.h"
@@ -51,11 +54,7 @@
 
 namespace Ui
 {
-#ifdef PSI
 class QJackTrip;
-#else
-class QJackTripVS;
-#endif
 }  // namespace Ui
 
 #ifndef NO_VS
@@ -67,8 +66,9 @@ class QJackTrip : public QMainWindow
     Q_OBJECT
 
    public:
-    explicit QJackTrip(int argc = 0, bool suppressCommandlineWarning = false,
-                       QWidget* parent = nullptr);
+    explicit QJackTrip(QSharedPointer<Settings> settings,
+                       bool suppressCommandlineWarning = false,
+                       QWidget* parent                 = nullptr);
     ~QJackTrip() override;
 
     void closeEvent(QCloseEvent* event) override;
@@ -76,7 +76,7 @@ class QJackTrip : public QMainWindow
     void showEvent(QShowEvent* event) override;
 
 #ifndef NO_VS
-    enum uiModeT{UNSET, VIRTUAL_STUDIO, STANDARD};
+    enum uiModeT { UNSET, VIRTUAL_STUDIO, STANDARD };
     void setVs(QSharedPointer<VirtualStudio> vs);
 #endif
 
@@ -99,6 +99,8 @@ class QJackTrip : public QMainWindow
     void start();
     void stop();
     void exit();
+    void updatedInputMeasurements(const float* valuesInDb, int numChannels);
+    void updatedOutputMeasurements(const float* valuesInDb, int numChannels);
 #ifndef NO_VS
     void virtualStudioMode();
 #endif
@@ -111,7 +113,7 @@ class QJackTrip : public QMainWindow
     void enableUi(bool enabled);
     void advancedOptionsForHubServer(bool isHubServer);
     void migrateSettings();
-    void loadSettings();
+    void loadSettings(Settings* cliSettings = nullptr);
     void saveSettings();
 
 #ifdef RT_AUDIO
@@ -119,32 +121,47 @@ class QJackTrip : public QMainWindow
 #endif
 
     void appendPlugins(JackTrip* jackTrip, int numSendChannels, int numRecvChannels);
+    void createMeters(quint32 inputChannels, quint32 outputChannels);
+    void removeMeters();
 
     QString commandLineFromCurrentOptions();
     void showCommandLineMessageBox();
 
-#ifdef PSI
+    JackTrip::hubConnectionModeT hubModeFromPatchType(patchTypeT patchType);
+
     QScopedPointer<Ui::QJackTrip> m_ui;
-#else
-    QScopedPointer<Ui::QJackTripVS> m_ui;
-#endif
     QScopedPointer<UdpHubListener> m_udpHub;
     QScopedPointer<JackTrip> m_jackTrip;
     QScopedPointer<QNetworkAccessManager> m_netManager;
     QScopedPointer<MessageDialog> m_statsDialog;
     QScopedPointer<MessageDialog> m_debugDialog;
+    QScopedPointer<QGridLayout> m_inputLayout;
+    QScopedPointer<QGridLayout> m_outputLayout;
     std::ostream m_realCout;
     std::ostream m_realCerr;
+    QString m_assignedClientName;
     bool m_jackTripRunning;
     bool m_isExiting;
+    bool m_exitSent;
+
+    QSharedPointer<Settings> m_cliSettings;
+    bool m_suppressCommandlineWarning;
+
+    float m_meterMax = 0.0;
+    float m_meterMin = -64.0;
+
+    QList<VuMeter*> m_inputMeters;
+    QList<QLabel*> m_inputLabels;
+    QList<VuMeter*> m_outputMeters;
+    QList<QLabel*> m_outputLabels;
 
     QMutex m_requestMutex;
     QString m_IPv6Address;
-    bool m_hasIPv4Reply;
+    QString m_IPv4Address;
+    int m_replyCount = 0;
     QString m_lastPath;
 
     QLabel m_autoQueueIndicator;
-    int m_argc;
     bool m_hideWarning;
     bool m_firstShow = true;
 

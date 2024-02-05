@@ -35,8 +35,12 @@ const QString About::s_buildType = QLatin1String("");
 #endif
 #ifdef BUILD_ID
 const QString About::s_buildID = QStringLiteral(BUILD_ID);
+#elif defined(JACKTRIP_BUILD_INFO)
+#define STR(s)       #s
+#define TO_STRING(s) STR(s)
+const QString About::s_buildID   = QLatin1String(TO_STRING(JACKTRIP_BUILD_INFO));
 #else
-const QString About::s_buildID   = QLatin1String("");
+const QString About::s_buildID = QLatin1String("");
 #endif
 
 About::About(QWidget* parent) : QDialog(parent), m_ui(new Ui::About)
@@ -48,6 +52,8 @@ About::About(QWidget* parent) : QDialog(parent), m_ui(new Ui::About)
 
     m_ui->aboutLabel->setText(
         m_ui->aboutLabel->text().replace(QLatin1String("%VERSION%"), gVersion));
+    m_ui->aboutLabel->setText(
+        m_ui->aboutLabel->text().replace(QLatin1String("%QTVERSION%"), qVersion()));
 #ifdef QT_OPENSOURCE
     m_ui->aboutLabel->setText(m_ui->aboutLabel->text().replace(
         QLatin1String("%LICENSE%"),

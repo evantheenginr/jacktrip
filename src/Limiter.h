@@ -49,11 +49,11 @@
 #endif
 
 #include <cassert>
+#include <cmath>
 #include <iostream>
 #include <vector>
 
 #include "ProcessPlugin.h"
-#include "limiterdsp.h"
 
 /** \brief The Limiter class confines the output dynamic range to a
  *  "dynamic range lane" determined by the assumed number of clients.
@@ -62,67 +62,12 @@ class Limiter : public ProcessPlugin
 {
    public:
     /// \brief The class constructor sets the number of channels to limit
-    Limiter(int numchans, int numclients, bool verboseFlag = false)  // xtor
-        : mNumChannels(numchans)
-        , mNumClients(numclients)
-        , warningAmp(0.0)
-        , warnCount(0)
-        , peakMagnitude(0.0)
-        , nextWarning(1)
-    {
-        setVerbose(verboseFlag);
-        for (int i = 0; i < mNumChannels; i++) {
-            limiterP.push_back(new limiterdsp);
-            limiterUIP.push_back(new APIUI);  // #included in limiterdsp.h
-            limiterP[i]->buildUserInterface(limiterUIP[i]);
-#ifdef SINE_TEST
-            limiterTestP.push_back(new limitertest);
-            limiterTestUIP.push_back(new APIUI);  // #included in limitertest.h
-            limiterTestP[i]->buildUserInterface(limiterTestUIP[i]);
-#endif
-        }
-        //    std::cout << "Limiter: constructed for "
-        // << mNumChannels << " channels and "
-        // << mNumClients << " assumed clients\n";
-    }
+    Limiter(int numchans, int numclients, bool verboseFlag = false);
 
     /// \brief The class destructor
-    virtual ~Limiter()
-    {
-        for (int i = 0; i < mNumChannels; i++) {
-            delete limiterP[i];
-            delete limiterUIP[i];
-        }
-        limiterP.clear();
-        limiterUIP.clear();
-    }
+    virtual ~Limiter();
 
-    void init(int samplingRate) override
-    {
-        ProcessPlugin::init(samplingRate);
-        if (samplingRate != fSamplingFreq) {
-            std::cerr << "Sampling rate not set by superclass!\n";
-            std::exit(1);
-        }
-        fs = float(fSamplingFreq);
-        for (int i = 0; i < mNumChannels; i++) {
-            limiterP[i]->init(
-                fs);  // compression filter parameters depend on sampling rate
-            int ndx = limiterUIP[i]->getParamIndex("NumClientsAssumed");
-            limiterUIP[i]->setParamValue(ndx, mNumClients);
-#ifdef SINE_TEST
-            limiterTestP[i]->init(fs);  // oscillator parameters depend on sampling rate
-            ndx = limiterTestUIP[i]->getParamIndex("Amp");
-            limiterTestUIP[i]->setParamValue(ndx, 0.2);
-            ndx = limiterTestUIP[i]->getParamIndex("Freq");
-            float sineFreq =
-                110.0 * pow(1.5, double(i))
-                * (mNumClients > 1 ? 1.25 : 1.0);  // Maj 7 chord for stereo in & out
-            limiterTestUIP[i]->setParamValue(ndx, sineFreq);
-#endif
-        }
-        inited = true;
-    }
+    void init(int samplingRate, int bufferSize) override;
     int getNumInputs() override { return (mNumChannels); }
     int getNumOutputs() override { return (mNumChannels); }
     void compute(int nframes, float** inputs, float** outputs) override;
@@ -130,7 +75,7 @@ class Limiter : public ProcessPlugin
 
     void setWarningAmplitude(double wa)
     {  // setting to 0 turns off warnings
-        warningAmp = std::max(0.0, std::min(1.0, wa));
+        warningAmp = std::max<double>(0.0, std::min<double>(1.0, wa));
     }
 
    private:
@@ -147,7 +92,7 @@ class Limiter : public ProcessPlugin
                                               // ../faust-src/limiterdsp.dsp
             if (limiterAmp >= warningAmp) {
                 warnCount++;
-                peakMagnitude = std::max(peakMagnitude, limiterAmp);
+                peakMagnitude = std::max<double>(peakMagnitude, limiterAmp);
                 if (warnCount == nextWarning) {
                     double peakMagnitudeDB = 20.0 * std::log10(peakMagnitude);
                     double warningAmpDB    = 20.0 * std::log10(warningAmp);
@@ -190,11 +135,11 @@ class Limiter : public ProcessPlugin
     float fs;
     int mNumChannels;
     int mNumClients;
-    std::vector<limiterdsp*> limiterP;
-    std::vector<APIUI*> limiterUIP;
+    std::vector<void*> limiterP;
+    std::vector<void*> limiterUIP;
 #ifdef SINE_TEST
-    std::vector<limitertest*> limiterTestP;
-    std::vector<APIUI*> limiterTestUIP;
+    std::vector<void*> limiterTestP;
+    std::vector<void*> limiterTestUIP;
 #endif
     double warningAmp;
     uint32_t warnCount;

@@ -38,14 +38,19 @@
 #ifndef VSDEVICE_H
 #define VSDEVICE_H
 
+#include <QMutex>
 #include <QObject>
 #include <QString>
+#include <QTimer>
 #include <QUuid>
-#include <QtNetworkAuth>
 #include <QtWebSockets>
 
 #include "../JackTrip.h"
 #include "../jacktrip_globals.h"
+#include "vsApi.h"
+#include "vsAudio.h"
+#include "vsAuth.h"
+#include "vsConstants.h"
 #include "vsPinger.h"
 #include "vsServerInfo.h"
 #include "vsWebSocket.h"
@@ -56,47 +61,62 @@ class VsDevice : public QObject
 
    public:
     // Constructor
-    explicit VsDevice(QOAuth2AuthorizationCodeFlow* authenticator,
-                      QObject* parent = nullptr);
+    explicit VsDevice(QSharedPointer<VsAuth>& auth, QSharedPointer<VsApi>& api,
+                      QSharedPointer<VsAudio>& audio, QObject* parent = nullptr);
+    virtual ~VsDevice();
 
     // Public functions
     void registerApp();
     void removeApp();
     void sendHeartbeat();
-    void setServerId(QString studioID);
+    bool hasTerminated();
     JackTrip* initJackTrip(bool useRtAudio, std::string input, std::string output,
-                           int bufferSize, VsServerInfo* studioInfo);
-    void startJackTrip();
-    void stopJackTrip();
+                           int baseInputChannel, int numChannelsIn, int baseOutputChannel,
+                           int numChannelsOut, int inputMixMode, int bufferSize,
+                           int bufferStrategy, VsServerInfo* studioInfo);
+    void startJackTrip(const VsServerInfo& studioInfo);
+    void stopJackTrip(bool isReconnecting = false);
     void reconcileAgentConfig(QJsonDocument newState);
-
-    VsPinger* startPinger(VsServerInfo* studioInfo);
-    void stopPinger();
+    void setNetworkOutage(bool outage = true) { m_networkOutage = outage; }
+    bool getNetworkOutage() const { return m_networkOutage; }
 
    signals:
     void updateNetworkStats(QJsonObject stats);
 
+   public slots:
+    void syncDeviceSettings();
+
    private slots:
-    void terminateJackTrip();
+    void handleJackTripError();
     void onTextMessageReceived(const QString& message);
+    void restartDeviceSocket();
+    void sendLevels();
 
    private:
+    void updateState(const QString& serverId);
     void registerJTAsDevice();
     bool enabled();
+    int selectBindPort();
     QString randomString(int stringLength);
 
-    VsPinger* m_pinger = NULL;
+    QSharedPointer<VsAuth> m_auth;
+    QSharedPointer<VsApi> m_api;
+    QSharedPointer<VsAudio> m_audioConfigPtr;
+    QScopedPointer<VsPinger> m_pinger;
 
     QString m_appID;
     QString m_appUUID;
     QString m_token;
     QString m_apiPrefix;
     QString m_apiSecret;
+    QMutex m_stopMutex;
     QJsonObject m_deviceAgentConfig;
-    VsWebSocket* m_webSocket = NULL;
+    QScopedPointer<VsWebSocket> m_deviceSocketPtr;
     QScopedPointer<JackTrip> m_jackTrip;
-    QOAuth2AuthorizationCodeFlow* m_authenticator;
     QRandomGenerator m_randomizer;
+    QTimer m_sendVolumeTimer;
+    bool m_networkOutage = false;
+    bool m_stopping      = false;
 };
 
 #endif  // VSDEVICE_H

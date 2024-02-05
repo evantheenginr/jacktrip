@@ -38,6 +38,7 @@
 #ifndef __PROCESSPLUGIN_H__
 #define __PROCESSPLUGIN_H__
 
+#include <QObject>
 #include <QThread>
 
 /** \brief Interface for the process plugins to add to the JACK callback process in
@@ -48,8 +49,10 @@
  * methods except init, which is optional for processing that are sampling rate dependent
  * or that need specific initialization.
  */
-class ProcessPlugin
+class ProcessPlugin : public QObject
 {
+    Q_OBJECT;
+
    public:
     /// \brief The Class Constructor
     ProcessPlugin(){};
@@ -69,23 +72,49 @@ class ProcessPlugin
      * initializes the Sampling Frequency. If a class instance depends on the
      * sampling frequency, it should be initialize here.
      */
-    virtual void init(int samplingRate)
+    virtual void init(int samplingRate, int bufferSize)
     {
+        if (samplingRate <= 0) {
+            samplingRate = 48000;
+            printf("%s: *** HAD TO GUESS the sampling rate (chose 48000 Hz) ***\n",
+                   getName());
+        }
+        if (bufferSize <= 0) {
+            bufferSize = 128;
+            printf("%s: *** HAD TO GUESS the buffer size (chose 128) ***\n", getName());
+        }
         fSamplingFreq = samplingRate;
+        mBufferSize   = bufferSize;
         if (verbose) {
-            printf("%s: init(%d)\n", getName(), samplingRate);
+            printf("%s: init(%d, %d)\n", getName(), samplingRate, bufferSize);
         }
     }
     virtual bool getInited() { return inited; }
     virtual void setVerbose(bool v) { verbose = v; }
 
+    virtual void setOutgoingToNetwork(bool toNetwork)
+    {
+        outgoingPluginToNetwork = toNetwork;
+    }
+
     /// \brief Compute process
     virtual void compute(int nframes, float** inputs, float** outputs) = 0;
 
+    /**
+     * @brief This function may optionally be used by plugins. This is useful
+     * if the number of audio channels in the parent audio interface has changed
+     * after the plugin instance was instantiated, to tell the plugin to modify its
+     * functionality.
+     */
+    virtual void updateNumChannels(int /*nChansIn*/, int /*nChansOut*/) { return; };
+
    protected:
-    int fSamplingFreq;  ///< Faust Data member, Sampling Rate
-    bool inited  = false;
-    bool verbose = false;
+    int fSamplingFreq;  //< Faust Data member, Sampling Rate
+    int mBufferSize;    //< expected number of samples per compute callbacks
+    bool inited                  = false;
+    bool verbose                 = false;
+    bool outgoingPluginToNetwork = false;  //< Tells the plugin if it processes audio
+                                           // going into or out of the network
 };
 
 #endif

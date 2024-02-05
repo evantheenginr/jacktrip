@@ -37,27 +37,34 @@
 
 #ifndef NO_GUI
 #include <QApplication>
-#include <QCommandLineParser>
+#if !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QQuickStyle>
+#endif
 
 #ifndef NO_UPDATER
 #include "dblsqd/feed.h"
 #include "dblsqd/update_dialog.h"
 #endif
 
-#ifndef NO_VS
+#if !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #include <QDebug>
+#include <QDir>
 #include <QFile>
-#include <QLocalServer>
-#include <QLocalSocket>
 #include <QQmlEngine>
 #include <QQuickView>
+#include <QSGRendererInterface>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QTextStream>
+// TODO: Add support for QtWebView
+//#include <QtWebView>
+#include <QtWebEngineQuick/qtwebenginequickglobal.h>
 
 #include "JTApplication.h"
 #include "gui/virtualstudio.h"
-#include "gui/vsUrlHandler.h"
-#endif
+#include "gui/vsDeeplink.h"
+#include "gui/vsQmlClipboard.h"
+#endif  // NO_VS && QT_VERSION
 
 #include "gui/qjacktrip.h"
 #else
@@ -79,10 +86,10 @@
 #endif
 
 #ifndef NO_GUI
-#ifndef NO_VS
+#if !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 static QTextStream* ts;
 static QFile outFile;
-#endif  // NO_VS
+#endif  // NO_VS && QT_VERSION
 #endif  // NO_GUI
 
 QCoreApplication* createApplication(int& argc, char* argv[])
@@ -90,9 +97,11 @@ QCoreApplication* createApplication(int& argc, char* argv[])
     // Check for some specific, GUI related command line options.
     bool forceGui = false;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--gui") == 0) {
+        if (strncmp(argv[i], "--gui", 5) == 0 || strncmp(argv[i], "--deeplink", 10) == 0
+            || strncmp(argv[i], "--classic-gui", 13) == 0
+            || strncmp(argv[i], "jacktrip://", 11) == 0) {
             forceGui = true;
-        } else if (strcmp(argv[i], "--test-gui") == 0) {
+        } else if (strncmp(argv[i], "--test-gui", 10) == 0) {
             // Command line option to test if the binary has been built with GUI support.
             // Exits immediately. Exits with an error if GUI support has not been built
             // in.
@@ -136,23 +145,56 @@ QCoreApplication* createApplication(int& argc, char* argv[])
             std::exit(1);
         }
 #endif
-#if defined(Q_OS_MACOS) && !defined(NO_VS)
+#if defined(Q_OS_MACOS) && !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
         // Turn on high DPI support.
+#if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
         JTApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+#endif
         // Fix for display scaling like 125% or 150% on Windows
 #if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
         QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
             Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
 #endif  // QT_VERSION
+
+        // Initialize webengine
+        QtWebEngineQuick::initialize();
+        // TODO: Add support for QtWebView
+        // qputenv("QT_WEBVIEW_PLUGIN", "native");
+        // QtWebView::initialize();
+
         return new JTApplication(argc, argv);
 #else
         // Turn on high DPI support.
+#if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
         QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+#endif
         // Fix for display scaling like 125% or 150% on Windows
 #if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
+#if defined(NO_VS) && defined(_WIN32)
+        QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
+            Qt::HighDpiScaleFactorRoundingPolicy::RoundPreferFloor);
+#else
         QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
             Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+#endif  // NO_VS
 #endif  // QT_VERSION
+
+#if !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        // Enables resource sharing between the OpenGL contexts
+        QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+        QCoreApplication::setAttribute(Qt::AA_UseDesktopOpenGL);
+        // QCoreApplication::setAttribute(Qt::AA_UseOpenGLES);
+
+        // QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D11);
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+
+        // Initialize webengine
+        QtWebEngineQuick::initialize();
+        // TODO: Add support for QtWebView
+        // qputenv("QT_WEBVIEW_PLUGIN", "native");
+        // QtWebView::initialize();
+#endif
+
         return new QApplication(argc, argv);
 #endif  // Q_OS_MACOS
 #endif  // NO_GUI
@@ -167,14 +209,10 @@ void qtMessageHandler([[maybe_unused]] QtMsgType type,
 {
     std::cerr << msg.toStdString() << std::endl;
 #ifndef NO_GUI
-#ifndef NO_VS
+#if !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     // Writes to file in order to debug bundles and executables
-#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
     *ts << msg << Qt::endl;
-#else
-    *ts << msg << endl;
-#endif  // QT_VERSION > 5.14.0
-#endif  // NO_VS
+#endif  // NO_VS && QT_VERSION
 #endif  // NO_GUI
 }
 
@@ -257,6 +295,16 @@ bool isRunFromCmd()
             if (size >= 6 && strncmp(pname + size - 6, "wt.exe", 6) == 0) {
                 return true;
             }
+            // a few extras for msys/cygwin/etc
+            if (size >= 8 && strncmp(pname + size - 8, "bash.exe", 8) == 0) {
+                return true;
+            }
+            if (size >= 6 && strncmp(pname + size - 6, "sh.exe", 6) == 0) {
+                return true;
+            }
+            if (size >= 7 && strncmp(pname + size - 7, "zsh.exe", 7) == 0) {
+                return true;
+            }
         } else {
             CloseHandle(h);
         }
@@ -273,17 +321,16 @@ int main(int argc, char* argv[])
     QScopedPointer<UdpHubListener> udpHub;
 #ifndef NO_GUI
     QSharedPointer<QJackTrip> window;
+#if !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QQuickStyle::setStyle("Basic");
+#endif  // QT_VERSION
 
-#ifndef NO_VS
-    QString deeplink = QLatin1String("");
-    QSharedPointer<VirtualStudio> vs;
-#ifdef _WIN32
-    QSharedPointer<QLocalServer> instanceServer;
-    QSharedPointer<QLocalSocket> instanceCheckSocket;
-#endif
-#endif
+#if !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QSharedPointer<VirtualStudio> vsPtr;
+    QScopedPointer<VsDeeplink> vsDeeplinkPtr;
+#endif  // NO_VS && QT_VERSION
 
-#if defined(Q_OS_MACOS) && !defined(NO_VS)
+#if defined(Q_OS_MACOS) && !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     if (qobject_cast<JTApplication*>(app.data())) {
 #else
     if (qobject_cast<QApplication*>(app.data())) {
@@ -293,6 +340,14 @@ int main(int argc, char* argv[])
         // Remove the console that appears if we're on windows and not running from a
         // command line.
         if (!isRunFromCmd()) {
+            std::cout << "This extra window is caused by a bug in Microsoft Windows. "
+                      << "It can safely be ignored or closed." << std::endl
+                      << std::endl
+                      << "To fix this bug, please upgrade to the latest version of "
+                      << "Windows Terminal available in the Microsoft App Store:"
+                      << std::endl
+                      << "https://aka.ms/terminal" << std::endl;
+
             FreeConsole();
         }
 #endif  // _WIN32
@@ -301,164 +356,58 @@ int main(int argc, char* argv[])
         app->setApplicationName(QStringLiteral("JackTrip"));
         app->setApplicationVersion(gVersion);
 
-        QCommandLineParser parser;
-        QCommandLineOption verboseOption(QStringList() << QStringLiteral("V")
-                                                       << QStringLiteral("verbose"));
-        parser.addOption(verboseOption);
-        parser.parse(app->arguments());
-        if (parser.isSet(verboseOption)) {
-            gVerboseFlag = true;
+        QSharedPointer<Settings> cliSettings;
+        cliSettings.reset(new Settings(true));
+        cliSettings->parseInput(argc, argv);
+
+#if !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        // Register clipboard Qml type
+        qmlRegisterType<VsQmlClipboard>("VS", 1, 0, "Clipboard");
+
+        // prepare handler for deeplinks jacktrip://join/<StudioID>
+        vsDeeplinkPtr.reset(new VsDeeplink(cliSettings->getDeeplink()));
+        if (!vsDeeplinkPtr->getDeeplink().isEmpty()) {
+            bool readyForExit = vsDeeplinkPtr->waitForReady();
+            if (readyForExit)
+                return 0;
         }
 
-#ifndef NO_VS
-        // Parse command line for deep link
-        QCommandLineOption deeplinkOption(QStringList() << QStringLiteral("deeplink"));
-        deeplinkOption.setValueName(QStringLiteral("deeplink"));
-        parser.addOption(deeplinkOption);
-        parser.parse(app->arguments());
-        if (parser.isSet(deeplinkOption)) {
-            deeplink = parser.value(deeplinkOption);
-        }
-
-        // Check if we need to show our first run window.
+        // Check which mode we are running in
         QSettings settings;
-        int uiMode = settings.value(QStringLiteral("UiMode"), QJackTrip::UNSET).toInt();
-#ifndef __unix__
-        QString updateChannel = settings.value(QStringLiteral("UpdateChannel"), "stable")
-                                    .toString()
-                                    .toLower();
-#endif
-#ifdef _WIN32
-        // Set url scheme in registry
-        QString path = QDir::toNativeSeparators(qApp->applicationFilePath());
+        int uiMode = QJackTrip::UNSET;
+        if (!vsDeeplinkPtr->getDeeplink().isEmpty()) {
+            uiMode = QJackTrip::VIRTUAL_STUDIO;
+        } else if (cliSettings->guiForceClassicMode()) {
+            uiMode = QJackTrip::STANDARD;
+            // force settings change; otherwise, virtual studio
+            // window will still be displayed
+            settings.setValue(QStringLiteral("UiMode"), uiMode);
+        } else {
+            uiMode = settings.value(QStringLiteral("UiMode"), QJackTrip::UNSET).toInt();
+        }
 
-        QSettings set("HKEY_CURRENT_USER\\Software\\Classes", QSettings::NativeFormat);
-        set.beginGroup("jacktrip");
-        set.setValue("Default", "URL:JackTrip Protocol");
-        set.setValue("DefaultIcon/Default", path);
-        set.setValue("URL Protocol", "");
-        set.setValue("shell/open/command/Default",
-                     QString("\"%1\"").arg(path) + " --gui --deeplink \"%1\"");
-        set.endGroup();
-
-        // Create socket
-        instanceCheckSocket =
-            QSharedPointer<QLocalSocket>::create(new QLocalSocket(app.data()));
-        // End process if instance exists
-        QObject::connect(
-            instanceCheckSocket.data(), &QLocalSocket::connected, app.data(),
-            [&]() {
-                // pass deeplink to existing instance before quitting
-                if (!deeplink.isEmpty()) {
-                    QByteArray baDeeplink = deeplink.toLocal8Bit();
-                    qint64 writeBytes     = instanceCheckSocket->write(baDeeplink);
-                    instanceCheckSocket->flush();
-                    instanceCheckSocket->disconnectFromServer();  // remove next
-
-                    if (writeBytes < 0) {
-                        qDebug() << "sending deeplink failed";
-                    }
-                }
-                emit QCoreApplication::quit();
-            },
-            Qt::QueuedConnection);
-        // Create instanceServer to prevent new instances from being created
-        void (QLocalSocket::*errorFunc)(QLocalSocket::LocalSocketError);
-#ifdef Q_OS_LINUX
-        errorFunc = &QLocalSocket::error;
+        window.reset(new QJackTrip(cliSettings, !vsDeeplinkPtr->getDeeplink().isEmpty()));
 #else
-        errorFunc = &QLocalSocket::errorOccurred;
-#endif
-        QObject::connect(
-            instanceCheckSocket.data(), errorFunc, app.data(),
-            [&](QLocalSocket::LocalSocketError socketError) {
-                switch (socketError) {
-                case QLocalSocket::ServerNotFoundError:
-                case QLocalSocket::SocketTimeoutError:
-                case QLocalSocket::ConnectionRefusedError:
-                    instanceServer = QSharedPointer<QLocalServer>::create(
-                        new QLocalServer(app.data()));
-                    instanceServer->setSocketOptions(QLocalServer::WorldAccessOption);
-                    instanceServer->listen("jacktripExists");
-                    QObject::connect(
-                        instanceServer.data(), &QLocalServer::newConnection, app.data(),
-                        [&]() {
-                            // This is the first instance. Bring it to the
-                            // top.
-                            vs->raiseToTop();
-                            while (instanceServer->hasPendingConnections()) {
-                                // Receive URL from 2nd instance
-                                QLocalSocket* connectedSocket =
-                                    instanceServer->nextPendingConnection();
-
-                                if (!connectedSocket->waitForConnected()) {
-                                    qDebug() << "Never received connection";
-                                    return;
-                                }
-
-                                if (!connectedSocket->waitForReadyRead()) {
-                                    qDebug() << "Never ready to read";
-                                    return;
-                                }
-
-                                if (connectedSocket->bytesAvailable()
-                                    < (int)sizeof(quint16)) {
-                                    qDebug() << "no bytes available";
-                                    break;
-                                }
-
-                                QByteArray in(connectedSocket->readAll());
-                                QString urlString(in);
-                                QUrl url(urlString);
-
-                                // Join studio using received URL
-                                if (url.scheme() == "jacktrip" && url.host() == "join") {
-                                    vs->setStudioToJoin(url);
-                                }
-                            }
-                        },
-                        Qt::QueuedConnection);
-                    break;
-                case QLocalSocket::PeerClosedError:
-                    break;
-                default:
-                    qDebug() << instanceCheckSocket->errorString();
-                }
-            });
-        // Check for existing instance
-        instanceCheckSocket->connectToServer("jacktripExists");
-
-#endif  // _WIN32
-        window.reset(new QJackTrip(argc, !deeplink.isEmpty()));
-#else
-        window.reset(new QJackTrip(argc));
+        window.reset(new QJackTrip(cliSettings));
 #endif  // NO_VS
         QObject::connect(window.data(), &QJackTrip::signalExit, app.data(),
                          &QCoreApplication::quit, Qt::QueuedConnection);
-#ifndef NO_VS
-        vs.reset(new VirtualStudio(uiMode == QJackTrip::UNSET));
-        QObject::connect(vs.data(), &VirtualStudio::signalExit, app.data(),
-                         &QCoreApplication::quit, Qt::QueuedConnection);
-        vs->setStandardWindow(window);
-        window->setVs(vs);
 
-        VsUrlHandler* m_urlHandler = new VsUrlHandler();
-        QDesktopServices::setUrlHandler(QStringLiteral("jacktrip"), m_urlHandler,
-                                        "handleUrl");
-        QObject::connect(m_urlHandler, &VsUrlHandler::joinUrlClicked, vs.data(),
-                         [&](const QUrl& url) {
-                             if (url.scheme() == QLatin1String("jacktrip")
-                                 && url.host() == QLatin1String("join")) {
-                                 vs->setStudioToJoin(url);
-                             }
-                         });
-        // Open with any command line-passed url
-        QDesktopServices::openUrl(QUrl(deeplink));
+#if !defined(NO_VS) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        vsPtr.reset(new VirtualStudio(uiMode == QJackTrip::UNSET));
+        QObject::connect(vsPtr.data(), &VirtualStudio::signalExit, app.data(),
+                         &QCoreApplication::quit, Qt::QueuedConnection);
+        vsPtr->setStandardWindow(window);
+        vsPtr->setCLISettings(cliSettings);
+        window->setVs(vsPtr);
+        QObject::connect(vsDeeplinkPtr.get(), &VsDeeplink::signalDeeplink, vsPtr.get(),
+                         &VirtualStudio::handleDeeplinkRequest, Qt::QueuedConnection);
+        vsDeeplinkPtr->readyForSignals();
 
         if (uiMode == QJackTrip::UNSET) {
-            vs->show();
+            vsPtr->show();
         } else if (uiMode == QJackTrip::VIRTUAL_STUDIO) {
-            vs->show();
+            vsPtr->show();
         } else {
             window->show();
         }
@@ -482,20 +431,28 @@ int main(int argc, char* argv[])
         window->show();
 #endif  // NO_VS
 
-#ifndef NO_UPDATER
+#if !defined(NO_UPDATER) && !defined(__unix__)
+#ifndef PSI
+#if defined(NO_VS) || QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+
+        // This wasn't set up earlier in NO_VS builds. Create it here.
+        QSettings settings;
+#endif
+        QString updateChannel = settings.value(QStringLiteral("UpdateChannel"), "stable")
+                                    .toString()
+                                    .toLower();
+        QString baseUrl = QStringLiteral("https://files.jacktrip.org/app-releases/%1")
+                              .arg(updateChannel);
+#else
+        QString baseUrl = QStringLiteral("https://nuages.psi-borg.org/jacktrip");
+#endif  // PSI
         // Setup auto-update feed
-        dblsqd::Feed* feed = 0;
-        QString baseUrl =
-            "https://raw.githubusercontent.com/jacktrip/jacktrip/dev/releases";
+        dblsqd::Feed* feed = new dblsqd::Feed();
 #ifdef Q_OS_WIN
-        feed = new dblsqd::Feed();
-        feed->setUrl(
-            QUrl(QString("%1/%2/%3-manifests.json").arg(baseUrl, updateChannel, "win")));
+        feed->setUrl(QUrl(QString("%1/%2-manifests.json").arg(baseUrl, "win")));
 #endif
 #ifdef Q_OS_MACOS
-        feed = new dblsqd::Feed();
-        feed->setUrl(
-            QUrl(QString("%1/%2/%3-manifests.json").arg(baseUrl, updateChannel, "mac")));
+        feed->setUrl(QUrl(QString("%1/%2-manifests.json").arg(baseUrl, "mac")));
 #endif
         if (feed) {
             dblsqd::UpdateDialog* updateDialog = new dblsqd::UpdateDialog(feed);
@@ -505,7 +462,9 @@ int main(int argc, char* argv[])
     } else {
 #endif  // NO_GUI
         // Otherwise use the non-GUI version, and parse our command line.
+#ifndef PSI
         QLoggingCategory::setFilterRules(QStringLiteral("*.debug=true"));
+#endif
         try {
             Settings settings;
             settings.parseInput(argc, argv);

@@ -31,7 +31,7 @@
 
 /**
  * \file virtualstudio.cpp
- * \author Aaron Wyatt
+ * \author Matt Horton, based on code by Aaron Wyatt
  * \date March 2022
  */
 
@@ -42,19 +42,32 @@
 #include <QMessageBox>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QSettings>
 #include <QSslSocket>
+#include <QSysInfo>
 #include <algorithm>
 #include <iostream>
 
+// TODO: remove me; including this to work-around this bug
+// https://bugreports.qt.io/browse/QTBUG-55199
+#include <QSvgGenerator>
+
+#include "../JackTrip.h"
+#include "../Settings.h"
 #include "../jacktrip_globals.h"
+#include "WebSocketTransport.h"
 #include "about.h"
 #include "qjacktrip.h"
+#include "vsApi.h"
+#include "vsAudio.h"
+#include "vsAuth.h"
+#include "vsDevice.h"
+#include "vsWebSocket.h"
 
-#ifdef USE_WEAK_JACK
-#include "weak_libjack.h"
-#endif
-#ifdef RT_AUDIO
-#include "RtAudio.h"
+#ifdef __APPLE__
+#include "vsMacPermissions.h"
+#else
+#include "vsPermissions.h"
 #endif
 
 #ifdef _WIN32
@@ -62,112 +75,125 @@
 #endif
 
 VirtualStudio::VirtualStudio(bool firstRun, QObject* parent)
-    : QObject(parent), m_showFirstRun(firstRun)
+    : QObject(parent)
+    , m_audioConfigPtr(
+          new VsAudio(this))  // this needs to be constructed before loadSettings()
+    , m_showFirstRun(firstRun)
 {
-    QSettings settings;
-    m_updateChannel =
-        settings.value(QStringLiteral("UpdateChannel"), "stable").toString().toLower();
-    settings.beginGroup(QStringLiteral("VirtualStudio"));
-    m_refreshToken    = settings.value(QStringLiteral("RefreshToken"), "").toString();
-    m_userId          = settings.value(QStringLiteral("UserId"), "").toString();
-    m_uiScale         = settings.value(QStringLiteral("UiScale"), 1).toFloat();
-    m_darkMode        = settings.value(QStringLiteral("DarkMode"), false).toBool();
-    m_showInactive    = settings.value(QStringLiteral("ShowInactive"), false).toBool();
-    m_showSelfHosted  = settings.value(QStringLiteral("ShowSelfHosted"), false).toBool();
-    m_showDeviceSetup = settings.value(QStringLiteral("ShowDeviceSetup"), true).toBool();
-    m_showWarnings    = settings.value(QStringLiteral("ShowWarnings"), true).toBool();
-    settings.endGroup();
-    m_previousUiScale = m_uiScale;
+    // load or initialize persisted settings
+    loadSettings();
+
+    // TODO: remove me; this is a hack for this bug
+    // https://bugreports.qt.io/browse/QTBUG-55199
+    QSvgGenerator svgImageHack;
+
+    // use a singleton QNetworkAccessManager
+    // WARNING: using a raw pointer and intentionally leaking this because
+    // it crashes at shutdown if you try to destruct it directly or try
+    // calling QObject::deleteLater()
+    m_networkAccessManagerPtr = new QNetworkAccessManager;
+
+    // instantiate API
+    m_api.reset(new VsApi(m_networkAccessManagerPtr));
+    m_api->setApiHost(PROD_API_HOST);
+    if (m_testMode) {
+        m_api->setApiHost(TEST_API_HOST);
+    }
+
+    // instantiate auth
+    m_auth.reset(new VsAuth(m_networkAccessManagerPtr, m_api.data()));
+    connect(m_auth.data(), &VsAuth::authSucceeded, this,
+            &VirtualStudio::slotAuthSucceeded);
+    connect(m_auth.data(), &VsAuth::refreshTokenFailed, this, [=]() {
+        m_auth->authenticate(QStringLiteral(""));  // retry without using refresh token
+    });
+    connect(m_auth.data(), &VsAuth::fetchUserInfoFailed, this, [=]() {
+        m_auth->authenticate(QStringLiteral(""));  // retry without using refresh token
+    });
+    connect(m_auth.data(), &VsAuth::deviceCodeExpired, this, [=]() {
+        m_auth->authenticate(QStringLiteral(""));  // retry without using refresh token
+    });
+
+    m_webChannelServer.reset(new QWebSocketServer(
+        QStringLiteral("Qt6 Virtual Studio Server"), QWebSocketServer::NonSecureMode));
+    connect(m_webChannelServer.data(), &QWebSocketServer::newConnection, this, [=]() {
+        m_webChannel->connectTo(
+            new WebSocketTransport(m_webChannelServer->nextPendingConnection()));
+    });
+
+    m_webChannel.reset(new QWebChannel());
+    m_webChannel->registerObject(QStringLiteral("virtualstudio"), this);
 
     // Load our font for our qml interface
     QFontDatabase::addApplicationFont(QStringLiteral(":/vs/Poppins-Regular.ttf"));
     QFontDatabase::addApplicationFont(QStringLiteral(":/vs/Poppins-Bold.ttf"));
 
-    connect(&m_view, &VsQuickView::windowClose, this, &VirtualStudio::exit);
-
     // Set our font scaling to convert points to pixels
-    m_fontScale = 4.0 / 3.0;
+    m_fontScale = float(4.0 / 3.0);
 
-#ifdef RT_AUDIO
-    settings.beginGroup(QStringLiteral("Audio"));
-    m_useRtAudio   = settings.value(QStringLiteral("Backend"), 0).toInt() == 1;
-    m_inputDevice  = settings.value(QStringLiteral("InputDevice"), "").toString();
-    m_outputDevice = settings.value(QStringLiteral("OutputDevice"), "").toString();
-    m_bufferSize   = settings.value(QStringLiteral("BufferSize"), 128).toInt();
-    settings.endGroup();
-    m_previousBuffer = m_bufferSize;
-    refreshDevices();
-    m_previousInput  = m_inputDevice;
-    m_previousOutput = m_outputDevice;
-#else
-    m_selectableBackend = false;
+    // Initialize timer needed for network outage indicator
+    m_networkOutageTimer.setTimerType(Qt::CoarseTimer);
+    m_networkOutageTimer.setSingleShot(true);
+    m_networkOutageTimer.setInterval(5000);
+    m_networkOutageTimer.callOnTimeout([&]() {
+        if (m_devicePtr.isNull())
+            return;
+        m_devicePtr->setNetworkOutage(false);
+        emit updatedNetworkOutage(false);
+    });
 
-    // Set our combo box models to an empty list to avoid a reference error
-    m_view.engine()->rootContext()->setContextProperty(
-        QStringLiteral("inputComboModel"),
-        QVariant::fromValue(QStringList(QLatin1String(""))));
-    m_view.engine()->rootContext()->setContextProperty(
-        QStringLiteral("outputComboModel"),
-        QVariant::fromValue(QStringList(QLatin1String(""))));
-#endif
-
-#ifdef USE_WEAK_JACK
-    // Check if Jack is available
-    if (have_libjack() != 0) {
-#ifdef RT_AUDIO
-        m_useRtAudio        = true;
-        m_selectableBackend = false;
-#else
-        // TODO: Handle this more gracefully, even if it's an unlikely scenario
-        qFatal("JACK not found and not built with RtAudio support.");
-#endif  // RT_AUDIO
+    if ((m_uiMode == QJackTrip::UNSET && vsFtux())
+        || (m_uiMode == QJackTrip::VIRTUAL_STUDIO)) {
+        m_windowState = QStringLiteral("login");
     }
-#endif  // USE_WEAK_JACK
-#ifdef RT_AUDIO
-    m_previousUseRtAudio = m_useRtAudio;
-#endif
 
-    m_view.engine()->rootContext()->setContextProperty(
-        QStringLiteral("bufferComboModel"), QVariant::fromValue(m_bufferOptions));
-    m_view.engine()->rootContext()->setContextProperty(
-        QStringLiteral("updateChannelComboModel"),
-        QVariant::fromValue(m_updateChannelOptions));
+    // register QML types
+    qmlRegisterType<VsServerInfo>("org.jacktrip.jacktrip", 1, 0, "VsServerInfo");
+
+    // setup QML view
     m_view.engine()->rootContext()->setContextProperty(QStringLiteral("virtualstudio"),
                                                        this);
-    m_view.engine()->rootContext()->setContextProperty(QStringLiteral("serverModel"),
-                                                       QVariant::fromValue(m_servers));
+    m_view.engine()->rootContext()->setContextProperty(QStringLiteral("auth"),
+                                                       m_auth.get());
+    m_view.engine()->rootContext()->setContextProperty(QStringLiteral("audio"),
+                                                       m_audioConfigPtr.get());
     m_view.engine()->rootContext()->setContextProperty(
-        QStringLiteral("backendComboModel"),
-        QVariant::fromValue(QStringList()
-                            << QStringLiteral("JACK") << QStringLiteral("RtAudio")));
+        QStringLiteral("permissions"),
+        QVariant::fromValue(&m_audioConfigPtr->getPermissions()));
     m_view.setSource(QUrl(QStringLiteral("qrc:/vs/vs.qml")));
-    m_view.setMinimumSize(QSize(594, 519));
+    m_view.setMinimumSize(QSize(800, 640));
     // m_view.setMaximumSize(QSize(696, 577));
-    m_view.resize(696 * m_uiScale, 577 * m_uiScale);
+    m_view.setResizeMode(QQuickView::SizeRootObjectToView);
+    m_view.resize(800 * m_uiScale, 640 * m_uiScale);
 
     // Connect our timers
-    connect(&m_startTimer, &QTimer::timeout, this, &VirtualStudio::checkForHostname);
-    connect(&m_retryPeriodTimer, &QTimer::timeout, this, &VirtualStudio::endRetryPeriod);
     connect(&m_refreshTimer, &QTimer::timeout, this, [&]() {
-        m_refreshMutex.lock();
-        if (m_allowRefresh) {
-            m_refreshMutex.unlock();
-            emit periodicRefresh();
-        } else {
-            m_refreshMutex.unlock();
-        }
+        emit periodicRefresh();
     });
+    connect(&m_heartbeatTimer, &QTimer::timeout, this, &VirtualStudio::sendHeartbeat,
+            Qt::QueuedConnection);
 
-    connect(&m_heartbeatTimer, &QTimer::timeout, this, [&]() {
-        sendHeartbeat();
-    });
-
-    // Connect joinStudio callbacks
-    connect(this, &VirtualStudio::studioToJoinChanged, this, &VirtualStudio::joinStudio);
     // QueuedConnection since refreshFinished is sometimes signaled from a network reply
     // thread
     connect(this, &VirtualStudio::refreshFinished, this, &VirtualStudio::joinStudio,
             Qt::QueuedConnection);
+
+    // handle audio config errors
+    connect(&m_audioConfigPtr->getWorker(), &VsAudioWorker::signalError, this,
+            &VirtualStudio::processError, Qt::QueuedConnection);
+
+    // when connected to server, trigger UI modal when feedback is detected
+    connect(m_audioConfigPtr.get(), &VsAudio::feedbackDetected, this,
+            &VirtualStudio::detectedFeedbackLoop, Qt::QueuedConnection);
+
+    // call exit() when the UI window is closed
+    connect(&m_view, &VsQuickView::windowClose, this, &VirtualStudio::exit,
+            Qt::QueuedConnection);
+
+    if ((m_uiMode == QJackTrip::UNSET && vsFtux())
+        || (m_uiMode == QJackTrip::VIRTUAL_STUDIO)) {
+        login();
+    }
 }
 
 void VirtualStudio::setStandardWindow(QSharedPointer<QJackTrip> window)
@@ -175,12 +201,20 @@ void VirtualStudio::setStandardWindow(QSharedPointer<QJackTrip> window)
     m_standardWindow = window;
 }
 
+void VirtualStudio::setCLISettings(QSharedPointer<Settings> settings)
+{
+    m_cliSettings = settings;
+}
+
 void VirtualStudio::show()
 {
     if (m_checkSsl) {
         // Check our available SSL version
         QString sslVersion = QSslSocket::sslLibraryVersionString();
-        std::cout << "SSL Library: " << sslVersion.toStdString() << std::endl;
+        // Important: this needs to be output with qDebug rather than to std::cout
+        // otherwise it may get passed to an existing JackTrip instance in place of our
+        // deeplink. (Need to find the root cause of this.)
+        qDebug() << "SSL Library: " << sslVersion;
         if (sslVersion.isEmpty()) {
             QMessageBox msgBox;
             msgBox.setText(
@@ -192,21 +226,57 @@ void VirtualStudio::show()
         m_checkSsl = false;
     }
 
-    if (!m_showFirstRun) {
-        toVirtualStudio();
+    while (m_view.status() == QQuickView::Loading) {
+        // I don't think there is any need to load network data, but just in case
+        // See https://doc.qt.io/qt-6/qquickview.html#Status-enum
+        qDebug() << "JackTrip is still loading the QML view";
+        QThread::sleep(1);
     }
-    m_view.show();
+
+    if (m_view.status() != QQuickView::Ready) {
+        QMessageBox msgBox;
+        msgBox.setText(
+            "JackTrip detected that some modules required for the "
+            "Virtual Studio mode are missing on your system. "
+            "Click \"OK\" to proceed to classic mode.\n\n"
+            "Details: JackTrip failed to load the QML view. "
+            "This is likely caused by missing QML plugins. "
+            "Please consult help.jacktrip.org for possible solutions.");
+        msgBox.setWindowTitle(QStringLiteral("JackTrip Is Missing QML Modules"));
+        connect(&msgBox, &QMessageBox::finished, this, &VirtualStudio::toStandard,
+                Qt::QueuedConnection);
+        msgBox.exec();
+        return;
+    }
+
+    raiseToTop();
 }
 
 void VirtualStudio::raiseToTop()
 {
+    if (m_view.status() != QQuickView::Ready)
+        return;
     m_view.show();             // Restore from systray
-    m_view.requestActivate();  // Raise to top
+    m_view.raise();            // raise to top
+    m_view.requestActivate();  // focus on window
+}
+
+int VirtualStudio::webChannelPort()
+{
+    return m_webChannelPort;
 }
 
 bool VirtualStudio::showFirstRun()
 {
     return m_showFirstRun;
+}
+
+void VirtualStudio::setShowFirstRun(bool show)
+{
+    if (m_showFirstRun == show)
+        return;
+    m_showFirstRun = show;
+    emit showFirstRunChanged();
 }
 
 bool VirtualStudio::hasRefreshToken()
@@ -224,93 +294,22 @@ QString VirtualStudio::logoSection()
     return m_logoSection;
 }
 
-bool VirtualStudio::selectableBackend()
+QString VirtualStudio::connectedErrorMsg()
 {
-    return m_selectableBackend;
+    return m_connectedErrorMsg;
 }
 
-QString VirtualStudio::audioBackend()
+void VirtualStudio::setConnectedErrorMsg(const QString& msg)
 {
-    return m_useRtAudio ? QStringLiteral("RtAudio") : QStringLiteral("JACK");
-}
-
-void VirtualStudio::setAudioBackend(const QString& backend)
-{
-    if (!m_selectableBackend) {
+    if (m_connectedErrorMsg == msg)
         return;
-    }
-    m_useRtAudio = (backend == QStringLiteral("RtAudio"));
-    emit audioBackendChanged();
+    m_connectedErrorMsg = msg;
+    emit connectedErrorMsgChanged();
 }
 
-int VirtualStudio::inputDevice()
+bool VirtualStudio::networkOutage()
 {
-#ifdef RT_AUDIO
-    if (m_useRtAudio) {
-        int index = m_inputDeviceList.indexOf(m_inputDevice);
-        return index >= 0 ? index : 0;
-    }
-#endif
-    return 0;
-}
-
-void VirtualStudio::setInputDevice([[maybe_unused]] int device)
-{
-    if (!m_useRtAudio) {
-        return;
-    }
-#ifdef RT_AUDIO
-    m_inputDevice = m_inputDeviceList.at(device);
-#endif
-}
-
-int VirtualStudio::outputDevice()
-{
-#ifdef RT_AUDIO
-    if (m_useRtAudio) {
-        int index = m_outputDeviceList.indexOf(m_outputDevice);
-        return index >= 0 ? index : 0;
-    }
-#endif
-    return 0;
-}
-
-void VirtualStudio::setOutputDevice([[maybe_unused]] int device)
-{
-    if (!m_useRtAudio) {
-        return;
-    }
-#ifdef RT_AUDIO
-    m_outputDevice = m_outputDeviceList.at(device);
-#endif
-}
-
-int VirtualStudio::bufferSize()
-{
-#ifdef RT_AUDIO
-    if (m_useRtAudio) {
-        int index = m_bufferOptions.indexOf(QString::number(m_bufferSize));
-        // It shouldn't be possible that our buffer size doesn't exists
-        // but default to 128 if something goes wrong.
-        return index >= 0 ? index : m_bufferOptions.indexOf(QStringLiteral("128"));
-    }
-#endif
-    return 3;
-}
-
-void VirtualStudio::setBufferSize([[maybe_unused]] int index)
-{
-    if (!m_useRtAudio) {
-        return;
-    }
-#ifdef RT_AUDIO
-    m_bufferSize = m_bufferOptions.at(index).toInt();
-#endif
-}
-
-int VirtualStudio::currentStudio()
-{
-    return m_currentStudio;
+    return m_devicePtr.isNull() ? false : m_devicePtr->getNetworkOutage();
 }
 
 QJsonObject VirtualStudio::regions()
@@ -340,9 +339,9 @@ QString VirtualStudio::updateChannel()
 
 void VirtualStudio::setUpdateChannel(const QString& channel)
 {
+    if (m_updateChannel == channel)
+        return;
     m_updateChannel = channel;
-    QSettings settings;
-    settings.setValue(QStringLiteral("UpdateChannel"), m_updateChannel);
     emit updateChannelChanged();
 }
 
@@ -353,7 +352,11 @@ bool VirtualStudio::showInactive()
 
 void VirtualStudio::setShowInactive(bool inactive)
 {
+    if (m_showInactive == inactive)
+        return;
     m_showInactive = inactive;
+    emit showInactiveChanged();
+
     QSettings settings;
     settings.beginGroup(QStringLiteral("VirtualStudio"));
     settings.setValue(QStringLiteral("ShowInactive"), m_showInactive);
@@ -367,11 +370,28 @@ bool VirtualStudio::showSelfHosted()
 
 void VirtualStudio::setShowSelfHosted(bool selfHosted)
 {
+    if (m_showSelfHosted == selfHosted)
+        return;
     m_showSelfHosted = selfHosted;
+    emit showSelfHostedChanged();
+
     QSettings settings;
     settings.beginGroup(QStringLiteral("VirtualStudio"));
     settings.setValue(QStringLiteral("ShowSelfHosted"), m_showSelfHosted);
     settings.endGroup();
+}
+
+bool VirtualStudio::showCreateStudio()
+{
+    return m_showCreateStudio;
+}
+
+void VirtualStudio::setShowCreateStudio(bool createStudio)
+{
+    if (m_showCreateStudio == createStudio)
+        return;
+    m_showCreateStudio = createStudio;
+    emit showCreateStudioChanged();
 }
 
 bool VirtualStudio::showDeviceSetup()
@@ -381,7 +401,77 @@ bool VirtualStudio::showDeviceSetup()
 
 void VirtualStudio::setShowDeviceSetup(bool show)
 {
+    if (m_showDeviceSetup == show)
+        return;
     m_showDeviceSetup = show;
+    emit showDeviceSetupChanged();
+}
+
+QString VirtualStudio::windowState()
+{
+    return m_windowState;
+}
+
+void VirtualStudio::setWindowState(QString state)
+{
+    if (m_windowState == state)
+        return;
+    m_windowState = state;
+    emit windowStateUpdated();
+}
+
+QString VirtualStudio::apiHost()
+{
+    return m_apiHost;
+}
+
+void VirtualStudio::setApiHost(QString host)
+{
+    if (m_apiHost == host)
+        return;
+    m_apiHost = host;
+    emit apiHostChanged();
+}
+
+bool VirtualStudio::vsFtux()
+{
+    return m_vsFtux;
+}
+
+bool VirtualStudio::isExiting()
+{
+    return m_isExiting;
+}
+
+void VirtualStudio::collectFeedbackSurvey(QString serverId, int rating, QString message)
+{
+    QJsonObject feedback;
+
+    QString sysInfo = QString("[platform=%1").arg(QSysInfo::prettyProductName());
+#ifdef RT_AUDIO
+    QString inputDevice =
+        QString::fromStdString(m_audioConfigPtr->getInputDevice().toStdString());
+    if (!inputDevice.isEmpty()) {
+        sysInfo.append(QString(",input=%1").arg(inputDevice));
+    }
+    QString outputDevice =
+        QString::fromStdString(m_audioConfigPtr->getOutputDevice().toStdString());
+    if (!outputDevice.isEmpty()) {
+        sysInfo.append(QString(",output=%1").arg(outputDevice));
+    }
+#endif
+    sysInfo.append("]");
+
+    feedback.insert(QStringLiteral("rating"), rating);
+    if (message.isEmpty()) {
+        feedback.insert(QStringLiteral("message"), sysInfo);
+    } else {
+        feedback.insert(QStringLiteral("message"), message + " " + sysInfo);
+    }
+
+    QJsonDocument data = QJsonDocument(feedback);
+    m_api->submitServerFeedback(serverId, data.toJson());
+    return;
 }
 
 bool VirtualStudio::showWarnings()
@@ -391,20 +481,10 @@ bool VirtualStudio::showWarnings()
 
 void VirtualStudio::setShowWarnings(bool show)
 {
+    if (m_showWarnings == show)
+        return;
     m_showWarnings = show;
-    QSettings settings;
-    settings.beginGroup(QStringLiteral("VirtualStudio"));
-    settings.setValue(QStringLiteral("ShowWarnings"), m_showWarnings);
-    settings.endGroup();
     emit showWarningsChanged();
-    // attempt to join studio if requested
-    if (!m_studioToJoin.isEmpty()) {
-        // device setup view proceeds warning view
-        // if device setup is shown, do not immediately join
-        if (!m_showDeviceSetup) {
-            joinStudio();
-        }
-    }
 }
 
 float VirtualStudio::fontScale()
@@ -419,6 +499,8 @@ float VirtualStudio::uiScale()
 
 void VirtualStudio::setUiScale(float scale)
 {
+    if (scale == m_uiScale)
+        return;
     m_uiScale = scale;
     emit uiScaleChanged();
 }
@@ -430,12 +512,74 @@ bool VirtualStudio::darkMode()
 
 void VirtualStudio::setDarkMode(bool dark)
 {
+    if (dark == m_darkMode)
+        return;
     m_darkMode = dark;
+    emit darkModeChanged();
+}
+
+bool VirtualStudio::collapseDeviceControls()
+{
+    return m_collapseDeviceControls;
+}
+
+void VirtualStudio::setCollapseDeviceControls(bool collapseDeviceControls)
+{
+    if (m_collapseDeviceControls == collapseDeviceControls)
+        return;
+    m_collapseDeviceControls = collapseDeviceControls;
+    emit collapseDeviceControlsChanged(collapseDeviceControls);
+}
+
+bool VirtualStudio::testMode()
+{
+    return m_testMode;
+}
+
+void VirtualStudio::setTestMode(bool test)
+{
+    if (m_testMode == test)
+        return;
+
+    QString userEmail = m_userMetadata[QStringLiteral("email")].toString();
+    if (m_userMetadata.isEmpty() || userEmail == ""
+        || !userEmail.endsWith("@jacktrip.org")) {
+        qDebug() << "Not allowed";
+        return;
+    }
+
+    // deregister app
+    if (!m_devicePtr.isNull()) {
+        m_devicePtr->removeApp();
+        m_devicePtr->disconnect();
+        m_devicePtr.reset();
+    }
+
+    m_testMode = test;
+
+    // clear existing auth state
+    m_auth->logout();
+
+    // Clear existing registers - any existing instance data will be overwritten
+    // when m_auth->authenticate finishes and slotAuthSucceeded() is called again
     QSettings settings;
     settings.beginGroup(QStringLiteral("VirtualStudio"));
-    settings.setValue(QStringLiteral("DarkMode"), m_darkMode);
+    settings.setValue(QStringLiteral("TestMode"), m_testMode);
+    settings.remove(QStringLiteral("RefreshToken"));
+    settings.remove(QStringLiteral("UserId"));
     settings.endGroup();
-    emit darkModeChanged();
+
+    // stop timers, clear data, etc.
+    resetState();
+
+    // clear user data
+    m_userMetadata = QJsonObject();
+    m_userId.clear();
+
+    // re-run authentication. This should not require another browser flow since
+    // we're starting with the existing refresh token
+    m_auth->authenticate(m_refreshToken);
+    emit testModeChanged();
 }
 
 QUrl VirtualStudio::studioToJoin()
@@ -445,6 +589,8 @@ QUrl VirtualStudio::studioToJoin()
 
 void VirtualStudio::setStudioToJoin(const QUrl& url)
 {
+    if (m_studioToJoin == url)
+        return;
     m_studioToJoin = url;
     emit studioToJoinChanged();
 }
@@ -474,20 +620,26 @@ QString VirtualStudio::failedMessage()
 
 void VirtualStudio::joinStudio()
 {
-    if (!m_authenticated || m_studioToJoin.isEmpty() || m_servers.isEmpty()) {
+    QMutexLocker locker(&m_refreshMutex);
+    bool authenticated = m_auth->isAuthenticated();
+    if (!authenticated || m_studioToJoin.isEmpty() || m_servers.isEmpty()) {
         // No servers yet. Making sure we have them.
         // getServerList emits refreshFinished which
         // will come back to this function.
-        if (m_authenticated && !m_studioToJoin.isEmpty() && m_servers.isEmpty()) {
+        if (authenticated && !m_studioToJoin.isEmpty() && m_servers.isEmpty()) {
+            locker.unlock();
             getServerList(true);
         }
         return;
+    }
+    if (m_windowState != "connected") {
+        return;  // on audio setup screen before joining the studio
     }
 
     QString scheme = m_studioToJoin.scheme();
     QString path   = m_studioToJoin.path();
     QString url    = m_studioToJoin.toString();
-    m_studioToJoin.clear();
+    setStudioToJoin(QUrl(""));
 
     m_failedMessage = "";
     if (scheme != "jacktrip" || path.length() <= 1) {
@@ -498,13 +650,20 @@ void VirtualStudio::joinStudio()
     }
     QString targetId = path.remove(0, 1);
 
-    int i = 0;
-    for (i = 0; i < m_servers.count(); i++) {
-        if (static_cast<VsServerInfo*>(m_servers.at(i))->id() == targetId) {
-            connectToStudio(i);
-            return;
+    VsServerInfoPointer sPtr;
+    for (const VsServerInfoPointer& s : m_servers) {
+        if (s->id() == targetId) {
+            sPtr = s;
+            break;
         }
     }
+    locker.unlock();
+
+    if (!sPtr.isNull()) {
+        connectToStudio(*sPtr);
+        return;
+    }
+
     m_failedMessage = "Unable to find studio " + targetId;
     emit failedMessageChanged();
     emit failed();
@@ -512,14 +671,20 @@ void VirtualStudio::joinStudio()
 
 void VirtualStudio::toStandard()
 {
-    if (!m_standardWindow.isNull()) {
-        m_view.hide();
-        m_standardWindow->show();
-    }
+    if (m_standardWindow.isNull())
+        qDebug() << "Unable to switch modes: standard window is missing!";
+
+    m_view.hide();
+    m_standardWindow->show();
+
     QSettings settings;
-    settings.setValue(QStringLiteral("UiMode"), QJackTrip::STANDARD);
-    m_refreshTimer.stop();
-    m_heartbeatTimer.stop();
+    m_uiMode = QJackTrip::STANDARD;
+    settings.setValue(QStringLiteral("UiMode"), m_uiMode);
+
+    // stop timers, clear data, etc.
+    resetState();
+    setWindowState(QStringLiteral("start"));
+    m_auth->logout();
 
     if (m_showFirstRun) {
         m_showFirstRun = false;
@@ -529,45 +694,51 @@ void VirtualStudio::toStandard()
 
 void VirtualStudio::toVirtualStudio()
 {
-    if (!m_refreshToken.isEmpty()) {
-        // Attempt to refresh our virtual studio auth token
-        setupAuthenticator();
+    QSettings settings;
+    m_uiMode = QJackTrip::VIRTUAL_STUDIO;
+    settings.setValue(QStringLiteral("UiMode"), m_uiMode);
 
-        // Something about this is required for refreshing auth tokens:
-        // https://bugreports.qt.io/browse/QTBUG-84866
-        m_authenticator->setModifyParametersFunction([](QAbstractOAuth2::Stage stage,
-                                                        QVariantMap* parameters) {
-            if (stage == QAbstractOAuth2::Stage::RequestingAccessToken) {
-                QByteArray code = parameters->value(QStringLiteral("code")).toByteArray();
-                (*parameters)[QStringLiteral("code")] = QUrl::fromPercentEncoding(code);
-            } else if (stage == QAbstractOAuth2::Stage::RequestingAuthorization) {
-                parameters->insert(QStringLiteral("audience"),
-                                   QStringLiteral("https://api.jacktrip.org"));
-            }
-            if (!parameters->contains("client_id")) {
-                parameters->insert("client_id", "cROUJag0UVKDaJ6jRAKRzlVjKVFNU39I");
-            }
-        });
-
-        m_authenticator->setRefreshToken(m_refreshToken);
-        m_authenticator->refreshAccessToken();
+    if (m_windowState == "start") {
+        setWindowState(QStringLiteral("login"));
+    }
+    if (m_windowState == "login") {
+        login();
     }
 }
 
 void VirtualStudio::login()
 {
-    setupAuthenticator();
-    m_authenticator->grant();
+    if (m_refreshToken.isEmpty()) {
+        m_auth->authenticate(QStringLiteral(""));
+    } else {
+        m_auth->authenticate(m_refreshToken);
+    }
 }
 
 void VirtualStudio::logout()
 {
-    if (m_device != nullptr) {
-        m_device->removeApp();
+    // deregister app
+    if (!m_devicePtr.isNull()) {
+        m_devicePtr->removeApp();
+        m_devicePtr->disconnect();
+        m_devicePtr.reset();
     }
 
-    m_authenticator->setToken(QLatin1String(""));
-    m_authenticator->setRefreshToken(QLatin1String(""));
+    QUrl logoutURL = QUrl("https://auth.jacktrip.org/v2/logout");
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("client_id"), AUTH_CLIENT_ID);
+    if (m_testMode) {
+        query.addQueryItem(QStringLiteral("returnTo"),
+                           QStringLiteral("https://test.jacktrip.org/"));
+    } else {
+        query.addQueryItem(QStringLiteral("returnTo"),
+                           QStringLiteral("https://app.jacktrip.org/"));
+    }
+
+    logoutURL.setQuery(query);
+    launchBrowser(logoutURL);
+
+    m_auth->logout();
 
     QSettings settings;
     settings.beginGroup(QStringLiteral("VirtualStudio"));
@@ -575,195 +746,201 @@ void VirtualStudio::logout()
     settings.remove(QStringLiteral("UserId"));
     settings.endGroup();
 
-    m_refreshTimer.stop();
-    m_heartbeatTimer.stop();
+    // stop timers, clear data, etc.
+    resetState();
 
+    // clear user data
     m_refreshToken.clear();
+    m_userMetadata = QJsonObject();
     m_userId.clear();
     emit hasRefreshTokenChanged();
+
+    // reset window state
+    setWindowState(QStringLiteral("login"));
+    login();  // called to retrieve new code flow token
 }
 
-void VirtualStudio::refreshStudios(int index)
+void VirtualStudio::refreshStudios(int index, bool signalRefresh)
 {
-    getServerList(false, index);
+    getSubscriptions();
+    getServerList(signalRefresh, index);
 }
 
-void VirtualStudio::refreshDevices()
+void VirtualStudio::loadSettings()
 {
-#ifdef RT_AUDIO
-    getDeviceList(&m_inputDeviceList, true);
-    getDeviceList(&m_outputDeviceList, false);
-    m_view.engine()->rootContext()->setContextProperty(
-        QStringLiteral("inputComboModel"), QVariant::fromValue(m_inputDeviceList));
-    m_view.engine()->rootContext()->setContextProperty(
-        QStringLiteral("outputComboModel"), QVariant::fromValue(m_outputDeviceList));
-
-    // Make sure we keep our current settings if the device still exists
-    if (!m_inputDeviceList.contains(m_inputDevice)) {
-        m_inputDevice = QStringLiteral("(default)");
-    }
-    if (!m_outputDeviceList.contains(m_outputDevice)) {
-        m_outputDevice = QStringLiteral("(default)");
-    }
-
-    emit inputDeviceChanged();
-    emit outputDeviceChanged();
-#endif
-}
-
-void VirtualStudio::revertSettings()
-{
-    m_uiScale = m_previousUiScale;
-    emit uiScaleChanged();
-#ifdef RT_AUDIO
-    // Restore our previous settings
-    m_inputDevice  = m_previousInput;
-    m_outputDevice = m_previousOutput;
-    m_bufferSize   = m_previousBuffer;
-    m_useRtAudio   = m_previousUseRtAudio;
-    emit inputDeviceChanged();
-    emit outputDeviceChanged();
-    emit bufferSizeChanged();
-    emit audioBackendChanged();
-#endif
-}
-
-void VirtualStudio::applySettings()
-{
-    m_previousUiScale = m_uiScale;
-    emit newScale();
     QSettings settings;
+    m_uiMode = static_cast<QJackTrip::uiModeT>(
+        settings.value(QStringLiteral("UiMode"), QJackTrip::UNSET).toInt());
+    setUpdateChannel(
+        settings.value(QStringLiteral("UpdateChannel"), "stable").toString().toLower());
+
+    settings.beginGroup(QStringLiteral("VirtualStudio"));
+    m_refreshToken   = settings.value(QStringLiteral("RefreshToken"), "").toString();
+    m_userId         = settings.value(QStringLiteral("UserId"), "").toString();
+    m_testMode       = settings.value(QStringLiteral("TestMode"), false).toBool();
+    m_showInactive   = settings.value(QStringLiteral("ShowInactive"), true).toBool();
+    m_showSelfHosted = settings.value(QStringLiteral("ShowSelfHosted"), false).toBool();
+
+    // use setters to emit signals for these if they change; otherwise, the
+    // user interface will not revert back after cancelling settings changes
+    setUiScale(settings.value(QStringLiteral("UiScale"), 1).toFloat());
+    setDarkMode(settings.value(QStringLiteral("DarkMode"), false).toBool());
+    setShowDeviceSetup(settings.value(QStringLiteral("ShowDeviceSetup"), true).toBool());
+    setShowWarnings(settings.value(QStringLiteral("ShowWarnings"), true).toBool());
+    settings.endGroup();
+
+    m_audioConfigPtr->loadSettings();
+}
+
+void VirtualStudio::saveSettings()
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("UpdateChannel"), m_updateChannel);
     settings.beginGroup(QStringLiteral("VirtualStudio"));
     settings.setValue(QStringLiteral("UiScale"), m_uiScale);
+    settings.setValue(QStringLiteral("DarkMode"), m_darkMode);
     settings.setValue(QStringLiteral("ShowDeviceSetup"), m_showDeviceSetup);
-    settings.endGroup();
-#ifdef RT_AUDIO
-    settings.beginGroup(QStringLiteral("Audio"));
-    settings.setValue(QStringLiteral("Backend"), m_useRtAudio ? 1 : 0);
-    settings.setValue(QStringLiteral("BufferSize"), m_bufferSize);
-    settings.setValue(QStringLiteral("InputDevice"), m_inputDevice);
-    settings.setValue(QStringLiteral("OutputDevice"), m_outputDevice);
+    settings.setValue(QStringLiteral("ShowWarnings"), m_showWarnings);
     settings.endGroup();
 
-    m_previousUseRtAudio = m_useRtAudio;
-    m_previousBuffer     = m_bufferSize;
-    m_previousInput      = m_inputDevice;
-    m_previousOutput     = m_outputDevice;
-
-    emit inputDeviceChanged();
-    emit outputDeviceChanged();
-#endif
-
-    // attempt to join studio if requested
-    // this function is called after the device setup view
-    // which can display upon opening the app from join link
-    if (!m_studioToJoin.isEmpty()) {
-        joinStudio();
-    }
+    m_audioConfigPtr->saveSettings();
 }
 
-void VirtualStudio::connectToStudio(int studioIndex)
+void VirtualStudio::connectToStudio(VsServerInfo& studio)
 {
-    {
-        QMutexLocker locker(&m_refreshMutex);
-        m_allowRefresh = false;
-    }
     m_refreshTimer.stop();
 
     m_networkStats = QJsonObject();
     emit networkStatsChanged();
 
-    m_currentStudio          = studioIndex;
-    VsServerInfo* studioInfo = static_cast<VsServerInfo*>(m_servers.at(m_currentStudio));
+    m_currentStudio = studio;
     emit currentStudioChanged();
     m_onConnectedScreen = true;
 
+    m_studioSocketPtr.reset(new VsWebSocket(
+        QUrl(QStringLiteral("wss://%1/api/servers/%2?auth_code=%3")
+                 .arg(m_api->getApiHost(), m_currentStudio.id(), m_auth->accessToken())),
+        m_auth->accessToken(), QString(), QString()));
+    connect(m_studioSocketPtr.get(), &VsWebSocket::textMessageReceived, this,
+            &VirtualStudio::handleWebsocketMessage);
+    connect(m_studioSocketPtr.get(), &VsWebSocket::disconnected, this,
+            &VirtualStudio::restartStudioSocket);
+    m_studioSocketPtr->openSocket();
+
     // Check if we have an address for our server
-    if (studioInfo->host().isEmpty()) {
-        // EXPERIMENTAL CODE. (It shouldn't be possible to arrive here.)
-        if (studioInfo->isManageable()) {
-            m_connectionState = QStringLiteral("Starting Studio...");
-            emit connectionStateChanged();
-
-            // Send a put request to start our studio
-            m_startedStudio = true;
-            QString expiration =
-                QDateTime::currentDateTimeUtc().addSecs(60 * 60).toString(Qt::ISODate);
-            QJsonObject json      = {{QLatin1String("enabled"), true},
-                                {QLatin1String("expiresAt"), expiration}};
-            QJsonDocument request = QJsonDocument(json);
-
-            QNetworkReply* reply = m_authenticator->put(
-                QStringLiteral("https://app.jacktrip.org/api/servers/%1")
-                    .arg(studioInfo->id()),
-                request.toJson());
-            connect(reply, &QNetworkReply::finished, this, [&, reply]() {
-                if (reply->error() != QNetworkReply::NoError) {
-                    m_connectionState = QStringLiteral("Unable to Start Studio");
-                    emit connectionStateChanged();
-                } else {
-                    QByteArray response       = reply->readAll();
-                    QJsonDocument serverState = QJsonDocument::fromJson(response);
-                    if (serverState.object()[QStringLiteral("status")].toString()
-                        == QLatin1String("Starting")) {
-                        // Start our timer to check for our hostname
-                        m_startTimer.setInterval(5000);
-                        m_startTimer.start();
-                    }
-                }
-                reply->deleteLater();
-            });
-        } else {
-            m_connectionState = QStringLiteral("Unable to Start Studio");
-            emit connectionStateChanged();
-            m_startedStudio = false;
-        }
+    if (m_currentStudio.status() != "Ready" && m_currentStudio.isAdmin() == true) {
+        m_connectionState = QStringLiteral("Waiting...");
+        emit connectionStateChanged();
     } else {
-        m_startedStudio = false;
         completeConnection();
     }
+
+    m_reconnectState = ReconnectState::NOT_RECONNECTING;
 }
 
 void VirtualStudio::completeConnection()
 {
-    if (m_currentStudio < 0) {
+    if (m_currentStudio.id() == ""
+        || m_currentStudio.status() == QStringLiteral("Disabled")) {
         return;
     }
 
+    // always connect with audio device controls open
+    setCollapseDeviceControls(false);
+
     m_jackTripRunning = true;
-    m_connectionState = QStringLiteral("Connecting...");
+    m_connectionState = QStringLiteral("Preparing audio...");
     emit connectionStateChanged();
-    VsServerInfo* studioInfo = static_cast<VsServerInfo*>(m_servers.at(m_currentStudio));
     try {
-        std::string input  = "";
-        std::string output = "";
-        int buffer_size    = 0;
+        bool useRtAudio       = m_audioConfigPtr->getUseRtAudio();
+        std::string input     = "";
+        std::string output    = "";
+        int buffer_size       = 0;
+        int inputMixMode      = -1;
+        int baseInputChannel  = 0;
+        int numInputChannels  = 2;
+        int baseOutputChannel = 0;
+        int numOutputChannels = 2;
 #ifdef RT_AUDIO
-        if (m_useRtAudio) {
-            input = m_inputDevice.toStdString();
-            if (m_inputDevice == QLatin1String("(default)")) {
-                input = "";
-            }
-            output = m_outputDevice.toStdString();
-            if (m_outputDevice == QLatin1String("(default)")) {
-                output = "";
-            }
-            buffer_size = m_bufferSize;
+        if (useRtAudio) {
+            // pre-populate device cache and validate first, if using rtaudio
+            if (!m_audioConfigPtr->getDeviceModelsInitialized())
+                m_audioConfigPtr->refreshDevices(true);
+            // initialize jacktrip using audio settings
+            input             = m_audioConfigPtr->getInputDevice().toStdString();
+            output            = m_audioConfigPtr->getOutputDevice().toStdString();
+            buffer_size       = m_audioConfigPtr->getBufferSize();
+            inputMixMode      = m_audioConfigPtr->getInputMixMode();
+            baseInputChannel  = m_audioConfigPtr->getBaseInputChannel();
+            numInputChannels  = m_audioConfigPtr->getNumInputChannels();
+            baseOutputChannel = m_audioConfigPtr->getBaseOutputChannel();
+            numOutputChannels = m_audioConfigPtr->getNumOutputChannels();
         }
 #endif
-        JackTrip* jackTrip =
-            m_device->initJackTrip(m_useRtAudio, input, output, buffer_size, studioInfo);
+
+        // increment buffer_strategy by 1 for array-index mapping
+        int buffer_strategy = m_audioConfigPtr->getBufferStrategy() + 1;
+        // adjust buffer_strategy for PLC "auto" mode menu item
+        if (buffer_strategy == 3) {
+            // run PLC without worker (4)
+            buffer_strategy = 4;
+            /*
+            // I don't believe this is still necessary,
+            // after splitting the input and output RtAudio streams
+            // See https://github.com/jacktrip/jacktrip/pull/1235
+            if (useRtAudio) {
+                // if same device for input and output,
+                // run PLC without worker (4)
+                if (input == output)
+                    buffer_strategy = 4;
+                // else run PLC with worker (3)
+                // to reduce crackles
+            } else {
+                // run PLC without worker (4)
+                buffer_strategy = 4;
+            }
+            */
+        } else if (buffer_strategy == 5) {
+            buffer_strategy = 3;  // run PLC with worker (3)
+        }
+
+        // create a new JackTrip instance
+        JackTrip* jackTrip = m_devicePtr->initJackTrip(
+            useRtAudio, input, output, baseInputChannel, numInputChannels,
+            baseOutputChannel, numOutputChannels, inputMixMode, buffer_size,
+            buffer_strategy, &m_currentStudio);
+        if (jackTrip == 0) {
+            processError("Could not bind port");
+            return;
+        }
+        jackTrip->setIOStatTimeout(m_cliSettings->getIOStatTimeout());
+
+        // this passes ownership to JackTrip
+        jackTrip->setAudioInterface(m_audioConfigPtr->newAudioInterface(jackTrip));
 
         QObject::connect(jackTrip, &JackTrip::signalProcessesStopped, this,
-                         &VirtualStudio::processFinished, Qt::QueuedConnection);
+                         &VirtualStudio::connectionFinished, Qt::QueuedConnection);
         QObject::connect(jackTrip, &JackTrip::signalError, this,
                          &VirtualStudio::processError, Qt::QueuedConnection);
         QObject::connect(jackTrip, &JackTrip::signalReceivedConnectionFromPeer, this,
                          &VirtualStudio::receivedConnectionFromPeer,
                          Qt::QueuedConnection);
+        QObject::connect(jackTrip, &JackTrip::signalUdpWaitingTooLong, this,
+                         &VirtualStudio::udpWaitingTooLong, Qt::QueuedConnection);
 
-        m_device->startJackTrip();
-        m_device->startPinger(studioInfo);
+        m_connectionState = QStringLiteral("Connecting...");
+        emit connectionStateChanged();
+        m_devicePtr->startJackTrip(m_currentStudio);
+
+        // update device error messages and warnings based on latest results
+        // this is necessary because we may have never loaded audio settings,
+        // or the state may have changed via the connected change devices screen
+        m_audioConfigPtr->setDevicesWarningMsg(jackTrip->getDevicesWarningMsg());
+        m_audioConfigPtr->setDevicesErrorMsg(jackTrip->getDevicesErrorMsg());
+        m_audioConfigPtr->setDevicesWarningHelpUrl(jackTrip->getDevicesWarningHelpUrl());
+        m_audioConfigPtr->setDevicesErrorHelpUrl(jackTrip->getDevicesErrorHelpUrl());
+        m_audioConfigPtr->setHighLatencyFlag(jackTrip->getHighLatencyFlag());
+
     } catch (const std::exception& e) {
         // Let the user know what our exception was.
         m_connectionState = QStringLiteral("JackTrip Error");
@@ -778,43 +955,44 @@ void VirtualStudio::completeConnection()
 #endif
 }
 
+void VirtualStudio::triggerReconnect(bool refresh)
+{
+    if (!m_jackTripRunning || m_devicePtr.isNull()) {
+        if (refresh)
+            m_audioConfigPtr->refreshDevices(true);
+        else
+            m_audioConfigPtr->validateDevices();
+        return;
+    }
+
+    // this needs to be synchronous to avoid both trying
+    // to use the audio interfaces at the same time
+    // note that connectionFinished() checks m_reconnectState
+    // and uses that to update audio, then reconnect
+    m_reconnectState  = refresh ? ReconnectState::RECONNECTING_REFRESH
+                                : ReconnectState::RECONNECTING_VALIDATE;
+    m_connectionState = QStringLiteral("Reconnecting...");
+    emit connectionStateChanged();
+
+    // keep device enabled while stopping jacktrip
+    m_devicePtr->stopJackTrip(true);
+}
+
 void VirtualStudio::disconnect()
 {
     m_connectionState = QStringLiteral("Disconnecting...");
     emit connectionStateChanged();
-    m_retryPeriodTimer.stop();
-    m_retryPeriod = false;
+    setConnectedErrorMsg("");
 
     if (m_jackTripRunning) {
-        if (m_startedStudio) {
-            VsServerInfo* studioInfo =
-                static_cast<VsServerInfo*>(m_servers.at(m_currentStudio));
-            QMessageBox msgBox;
-            msgBox.setText(QStringLiteral("Do you want to stop the current studio?"));
-            msgBox.setWindowTitle(QStringLiteral("Stop Studio"));
-            msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
-            msgBox.setDefaultButton(QMessageBox::Yes);
-            int ret = msgBox.exec();
-            if (ret == QMessageBox::Yes) {
-                studioInfo->setHost(QLatin1String(""));
-                stopStudio();
-            }
-        }
-
-        m_device->stopPinger();
-        m_device->stopJackTrip();
-    } else if (m_startedStudio) {
-        m_startTimer.stop();
-        stopStudio();
-        if (!m_isExiting) {
-            emit disconnected();
-            m_onConnectedScreen = false;
-        }
+        m_devicePtr->stopJackTrip(false);
+        // persist any volume level or device changes
+        m_audioConfigPtr->saveSettings();
     } else {
         // How did we get here? This shouldn't be possible, but include for safety.
         if (m_isExiting) {
             emit signalExit();
-        } else {
+        } else if (m_onConnectedScreen) {
             emit disconnected();
             m_onConnectedScreen = false;
         }
@@ -822,33 +1000,92 @@ void VirtualStudio::disconnect()
 
     // Restart our studio refresh timer.
     if (!m_isExiting) {
-        QMutexLocker locker(&m_refreshMutex);
-        m_allowRefresh = true;
         m_refreshTimer.start();
+    }
+
+    m_connectionState = QStringLiteral("Disconnected");
+    emit connectionStateChanged();
+
+    if (!m_currentStudio.id().isEmpty()) {
+        emit openFeedbackSurveyModal(m_currentStudio.id());
+    }
+
+    // cleanup
+    m_currentStudio.setId("");
+    emit currentStudioChanged();
+
+    if (!m_studioSocketPtr.isNull()) {
+        m_studioSocketPtr->closeSocket();
+        m_studioSocketPtr->disconnect();
+        m_studioSocketPtr.reset();
     }
 }
 
-void VirtualStudio::manageStudio(int studioIndex)
+void VirtualStudio::manageStudio(const QString& studioId, bool start)
 {
-    if (studioIndex == -1) {
-        // We're here from a connected screen. Use our current studio.
-        studioIndex = m_currentStudio;
+    if (studioId.isEmpty()) {
+        processError("Manage requires a unique studio identifier");
+        return;
     }
-    QUrl url =
-        QUrl(QStringLiteral("https://app.jacktrip.org/studios/%1")
-                 .arg(static_cast<VsServerInfo*>(m_servers.at(studioIndex))->id()));
+    QUrl url;
+    if (!start) {
+        url = QUrl(
+            QStringLiteral("https://%1/studios/%2").arg(m_api->getApiHost(), studioId));
+    } else {
+        QString expiration =
+            QDateTime::currentDateTimeUtc().addSecs(60 * 30).toString(Qt::ISODate);
+        QJsonObject json      = {{QLatin1String("enabled"), true},
+                            {QLatin1String("expiresAt"), expiration}};
+        QJsonDocument request = QJsonDocument(json);
+
+        QNetworkReply* reply = m_api->updateServer(studioId, request.toJson());
+        connect(reply, &QNetworkReply::finished, this, [&, reply]() {
+            if (reply->error() != QNetworkReply::NoError) {
+                m_connectionState      = QStringLiteral("Unable to Start Studio");
+                QJsonDocument errorDoc = QJsonDocument::fromJson(reply->readAll());
+                if (!errorDoc.isNull()) {
+                    QJsonObject errorObj = errorDoc.object();
+                    if (errorObj.contains("error")) {
+                        QString errorMessage = errorObj.value("error").toString();
+                        if (errorMessage.contains(
+                                "Only one studio may be running at a time")) {
+                            setConnectedErrorMsg("one-studio-limit-reached");
+                        }
+                    }
+                }
+                emit connectionStateChanged();
+            } else {
+                setConnectedErrorMsg("");
+                QByteArray response       = reply->readAll();
+                QJsonDocument serverState = QJsonDocument::fromJson(response);
+                if (serverState.object()[QStringLiteral("status")].toString()
+                    == QLatin1String("Starting")) {}
+            }
+            reply->deleteLater();
+        });
+    }
+    QDesktopServices::openUrl(url);
+}
+
+void VirtualStudio::launchVideo(const QString& studioId)
+{
+    if (studioId.isEmpty()) {
+        processError("Manage requires a unique studio identifier");
+        return;
+    }
+    QUrl url = QUrl(
+        QStringLiteral("https://%1/studios/%2/live").arg(m_api->getApiHost(), studioId));
     QDesktopServices::openUrl(url);
 }
 
 void VirtualStudio::createStudio()
 {
-    QUrl url = QUrl(QStringLiteral("https://app.jacktrip.org/studios/create"));
-    QDesktopServices::openUrl(url);
+    setWindowState(QStringLiteral("create_studio"));
 }
 
 void VirtualStudio::editProfile()
 {
-    QUrl url = QUrl(QStringLiteral("https://app.jacktrip.org/profile"));
+    QUrl url = QUrl(QStringLiteral("https://%1/profile").arg(m_api->getApiHost()));
     QDesktopServices::openUrl(url);
 }
 
@@ -858,81 +1095,192 @@ void VirtualStudio::showAbout()
     about.exec();
 }
 
+void VirtualStudio::openLink(const QString& link)
+{
+    QUrl url = QUrl(link);
+    QDesktopServices::openUrl(url);
+}
+
+void VirtualStudio::handleDeeplinkRequest(const QUrl& link)
+{
+    // check link is valid
+    if (link.scheme() != QLatin1String("jacktrip")
+        || link.host() != QLatin1String("join")) {
+        qDebug() << "Ignoring invalid deeplink to " << link;
+        return;
+    }
+
+    // check if already connected (ignore)
+    if (m_windowState == "connected" || m_windowState == "change_devices") {
+        qDebug() << "Already connected; ignoring deeplink to " << link;
+        return;
+    }
+
+    qDebug() << "Handling deeplink to " << link;
+    setStudioToJoin(link);
+    raiseToTop();
+
+    // Switch to virtual studio mode, if necessary
+    // Note that this doesn't change the startup preference
+    if (m_uiMode != QJackTrip::VIRTUAL_STUDIO) {
+        m_standardWindow->hide();
+        if (m_windowState == "start") {
+            setWindowState(QStringLiteral("login"));
+        }
+        if (m_windowState == "login") {
+            login();
+        }
+    }
+
+    // special case if on settings screen
+    if (m_windowState == "settings") {
+        if (showDeviceSetup()) {
+            // audio is already active, so we can just flip screens
+            setWindowState("setup");
+        } else {
+            // we need to stop audio before connecting
+            setWindowState("connected");
+            m_audioConfigPtr->stopAudio(true);
+            joinStudio();
+        }
+        return;
+    }
+
+    // special case if on create_studio screen:
+    // note that the studio creation happens inside of the web view,
+    // and the app doesn't really know anything about it. we depend
+    // on the web app triggering a deep link join event, which is
+    // handled here. it's unlikely that the new studio has been
+    // noticed yet, so we don't join right away; otherwise we'd just
+    // get an unknown studio error. instead, we trigger a refresh and
+    // rely on it to kick off the join afterwards.
+    if (m_windowState == "create_studio") {
+        refreshStudios(0, true);
+        if (showDeviceSetup()) {
+            setWindowState("setup");
+            m_audioConfigPtr->startAudio();
+        } else {
+            setWindowState("connected");
+        }
+        return;
+    }
+
+    // special case if on browsing and failed screens
+    if (m_windowState == "browse" || m_windowState == "failed") {
+        if (showDeviceSetup()) {
+            setWindowState("setup");
+            m_audioConfigPtr->startAudio();
+        } else {
+            setWindowState("connected");
+            joinStudio();
+        }
+        return;
+    }
+
+    // otherwise, assume we are on setup screens and can let the normal flow handle it
+}
+
 void VirtualStudio::exit()
 {
-    m_refreshTimer.stop();
-    m_heartbeatTimer.stop();
+    // if multiple close events are received, emit the signalExit to force-quit the app
+    if (m_isExiting) {
+        emit signalExit();
+    }
+
+    // triggering isExitingChanged will force any WebEngine things to close properly
+    m_isExiting = true;
+    emit isExitingChanged();
+
+    // stop timers, clear data, etc.
+    resetState();
+
     if (m_onConnectedScreen) {
-        m_isExiting = true;
-
-        if (m_device != nullptr) {
-            m_device->stopPinger();
-            m_device->stopJackTrip();
+        // manually disconnect on self-managed studios
+        if (!m_currentStudio.id().isEmpty() && !m_currentStudio.isManaged()) {
+            disconnect();
         }
-
-        disconnect();
     } else {
         emit signalExit();
     }
 }
 
-void VirtualStudio::slotAuthSucceded()
+void VirtualStudio::slotAuthSucceeded()
 {
-    m_authenticated = true;
-    m_refreshToken  = m_authenticator->refreshToken();
+    // Make sure window is on top (instead of browser, during first auth)
+    raiseToTop();
+
+    // Determine which API host to use
+    m_apiHost = PROD_API_HOST;
+    if (m_testMode) {
+        m_apiHost = TEST_API_HOST;
+    }
+    m_api->setApiHost(m_apiHost);
+
+    // Get refresh token and userId
+    m_refreshToken = m_auth->refreshToken();
+    m_userId       = m_auth->userId();
     emit hasRefreshTokenChanged();
+
     QSettings settings;
-    settings.setValue(QStringLiteral("UiMode"), QJackTrip::VIRTUAL_STUDIO);
     settings.beginGroup(QStringLiteral("VirtualStudio"));
     settings.setValue(QStringLiteral("RefreshToken"), m_refreshToken);
+    settings.setValue(QStringLiteral("UserId"), m_userId);
     settings.endGroup();
 
-    m_device = new VsDevice(m_authenticator.data());
-    m_device->registerApp();
+    // initialize new VsDevice and wire up signals/slots before registering app
+    m_devicePtr.reset(new VsDevice(m_auth, m_api, m_audioConfigPtr));
+    connect(m_devicePtr.get(), &VsDevice::updateNetworkStats, this,
+            &VirtualStudio::updatedStats);
+    connect(m_audioConfigPtr.get(), &VsAudio::updatedInputVolume, m_devicePtr.get(),
+            &VsDevice::syncDeviceSettings);
+    connect(m_audioConfigPtr.get(), &VsAudio::updatedInputMuted, m_devicePtr.get(),
+            &VsDevice::syncDeviceSettings);
+    connect(m_audioConfigPtr.get(), &VsAudio::updatedOutputVolume, m_devicePtr.get(),
+            &VsDevice::syncDeviceSettings);
+    connect(m_audioConfigPtr.get(), &VsAudio::updatedMonitorVolume, m_devicePtr.get(),
+            &VsDevice::syncDeviceSettings);
 
-    if (m_userId.isEmpty()) {
-        getUserId();
-    } else {
-        getSubscriptions();
-    }
+    m_devicePtr->registerApp();
 
-    if (m_regions.isEmpty()) {
-        getRegions();
+    if (!m_webChannelServer->listen(QHostAddress::LocalHost)) {
+        // shouldn't happen
+        std::cout << "ERROR: Failed to start server!" << std::endl;
     }
-    if (m_userMetadata.isEmpty()) {
-        getUserMetadata();
-    }
+    m_webChannelPort = m_webChannelServer->serverPort();
+    emit webChannelPortChanged(m_webChannelPort);
+    std::cout << "QWebChannel listening on port: " << m_webChannelPort << std::endl;
 
-    // attempt to join studio if requested
-    if (!m_studioToJoin.isEmpty()) {
-        // FTUX shows warnings and device setup views
-        // if any of these enabled, do not immediately join
-        if (!m_showWarnings && !m_showDeviceSetup) {
-            joinStudio();
+    getRegions();
+    getUserMetadata();
+    getSubscriptions();
+    getServerList(false);
+}
+
+void VirtualStudio::connectionFinished()
+{
+    if (!m_devicePtr.isNull()
+        && (m_reconnectState == ReconnectState::RECONNECTING_VALIDATE
+            || m_reconnectState == ReconnectState::RECONNECTING_REFRESH)) {
+        if (m_devicePtr->hasTerminated()) {
+            if (m_reconnectState == ReconnectState::RECONNECTING_REFRESH) {
+                m_audioConfigPtr->refreshDevices(true);
+            } else {
+                m_audioConfigPtr->validateDevices(true);
+            }
+            connectToStudio(m_currentStudio);
         }
+        return;
     }
-    connect(m_device, &VsDevice::updateNetworkStats, this, &VirtualStudio::updatedStats);
-}
+    m_reconnectState = ReconnectState::NOT_RECONNECTING;
 
-void VirtualStudio::slotAuthFailed()
-{
-    m_authenticated = false;
-    emit authFailed();
-}
+    // use disconnect function to handle reset of all internal flags and timers
+    disconnect();
 
-void VirtualStudio::processFinished()
-{
     // reset network statistics
     m_networkStats = QJsonObject();
 
     if (m_isExiting) {
         emit signalExit();
-        return;
-    }
-
-    if (m_retryPeriod && m_startedStudio) {
-        // Retry if necessary.
-        completeConnection();
         return;
     }
 
@@ -943,8 +1291,14 @@ void VirtualStudio::processFinished()
     m_jackTripRunning = false;
     m_connectionState = QStringLiteral("Disconnected");
     emit connectionStateChanged();
-    emit disconnected();
-    m_onConnectedScreen = false;
+
+    // if this occurs on the setup or settings screen (for example, due to an issue with
+    // devices) then don't emit disconnected, as that would move you back to the "Browse"
+    // screen
+    if (m_onConnectedScreen) {
+        m_onConnectedScreen = false;
+        emit disconnected();
+    }
 #ifdef __APPLE__
     m_noNap.enableNap();
 #endif
@@ -952,75 +1306,101 @@ void VirtualStudio::processFinished()
 
 void VirtualStudio::processError(const QString& errorMessage)
 {
-    if (!m_retryPeriod) {
-        QMessageBox msgBox;
-        if (errorMessage == QLatin1String("Peer Stopped")) {
-            // Report the other end quitting as a regular occurance rather than an error.
-            msgBox.setText("The Studio has been stopped.");
-            msgBox.setWindowTitle(QStringLiteral("Disconnected"));
+    static const QString RtAudioErrorMsg = QStringLiteral("RtAudio Error");
+    static const QString JackAudioErrorMsg =
+        QStringLiteral("The Jack server was shut down");
+
+    const bool shouldSwitchToRtAudio =
+        (errorMessage == QLatin1String("Maybe the JACK server is not running?"));
+
+    QMessageBox msgBox;
+    if (shouldSwitchToRtAudio) {
+        // Report the other end quitting as a regular occurance rather than an error.
+        msgBox.setText("The JACK server is not running. Switching back to RtAudio.");
+        msgBox.setWindowTitle(QStringLiteral("No JACK server"));
+    } else if (errorMessage == QLatin1String("Peer Stopped")) {
+        // Report the other end quitting as a regular occurance rather than an error.
+        msgBox.setText("The Studio has been stopped.");
+        msgBox.setWindowTitle(QStringLiteral("Disconnected"));
+    } else if (errorMessage.startsWith(RtAudioErrorMsg)) {
+        if (errorMessage.length() > RtAudioErrorMsg.length() + 2) {
+            const QString details(errorMessage.sliced(RtAudioErrorMsg.length() + 2));
+            if (details.contains(QStringLiteral("device was disconnected"))
+                || details.contains(
+                    QStringLiteral("Unable to retrieve capture buffer"))) {
+                msgBox.setText(QStringLiteral("Your audio interface was disconnected."));
+            } else {
+                msgBox.setText(details);
+            }
         } else {
-            msgBox.setText(QStringLiteral("Error: ").append(errorMessage));
-            msgBox.setWindowTitle(QStringLiteral("Doh!"));
+            msgBox.setText(errorMessage);
         }
-        msgBox.exec();
+        msgBox.setWindowTitle(QStringLiteral("Audio Interface Error"));
+    } else if (errorMessage.startsWith(JackAudioErrorMsg)) {
+        if (errorMessage.length() > JackAudioErrorMsg.length() + 2) {
+            msgBox.setText(errorMessage.sliced(JackAudioErrorMsg.length() + 2));
+        } else {
+            msgBox.setText(QStringLiteral("The JACK Audio Server was stopped."));
+        }
+        msgBox.setWindowTitle(QStringLiteral("Jack Audio Error"));
+    } else {
+        msgBox.setText(QStringLiteral("Error: ").append(errorMessage));
+        msgBox.setWindowTitle(QStringLiteral("Doh!"));
     }
-    processFinished();
+    msgBox.exec();
+
+    if (m_jackTripRunning)
+        connectionFinished();
 }
 
 void VirtualStudio::receivedConnectionFromPeer()
 {
     // Connect via API
-    VsServerInfo* studioInfo = static_cast<VsServerInfo*>(m_servers.at(m_currentStudio));
-    m_device->setServerId(studioInfo->id());
-
     m_connectionState = QStringLiteral("Connected");
     emit connectionStateChanged();
     std::cout << "Received connection" << std::endl;
     emit connected();
 }
 
-void VirtualStudio::checkForHostname()
+void VirtualStudio::handleWebsocketMessage(const QString& msg)
 {
-    if (m_currentStudio < 0) {
+    QJsonObject serverState = QJsonDocument::fromJson(msg.toUtf8()).object();
+    QString serverStatus    = serverState[QStringLiteral("status")].toString();
+    bool serverEnabled      = serverState[QStringLiteral("enabled")].toBool();
+    QString serverCloudId   = serverState[QStringLiteral("cloudId")].toString();
+
+    // server notifications are also transmitted along this websocket, so ignore data if
+    // it contains "message"
+    QString message = serverState[QStringLiteral("message")].toString();
+    if (!message.isEmpty()) {
         return;
     }
-
-    VsServerInfo* studioInfo = static_cast<VsServerInfo*>(m_servers.at(m_currentStudio));
-    QNetworkReply* reply     = m_authenticator->get(
-            QStringLiteral("https://app.jacktrip.org/api/servers/%1").arg(studioInfo->id()));
-    connect(reply, &QNetworkReply::finished, this, [&, reply, studioInfo]() {
-        if (reply->error() != QNetworkReply::NoError) {
-            m_connectionState = QStringLiteral("Unable to Start Studio");
-            emit connectionStateChanged();
-
-            // Stop our timer
-            m_startTimer.stop();
-        } else {
-            QByteArray response       = reply->readAll();
-            QJsonDocument serverState = QJsonDocument::fromJson(response);
-            if (serverState.object()[QStringLiteral("status")].toString()
-                == QLatin1String("Ready")) {
-                // Ready to connect
-                m_startTimer.stop();
-                studioInfo->setHost(
-                    serverState.object()[QStringLiteral("serverHost")].toString());
-                studioInfo->setPort(
-                    serverState.object()[QStringLiteral("serverPort")].toInt());
-                m_retryPeriod = true;
-                m_retryPeriodTimer.setInterval(15000);
-                m_retryPeriodTimer.start();
-                completeConnection();
-            }
+    if (m_currentStudio.id() == "") {
+        return;
+    }
+    m_currentStudio.setStatus(serverStatus);
+    m_currentStudio.setEnabled(serverEnabled);
+    m_currentStudio.setCloudId(serverCloudId);
+    if (!m_jackTripRunning) {
+        if (serverStatus == QLatin1String("Ready") && m_onConnectedScreen) {
+            m_currentStudio.setHost(serverState[QStringLiteral("serverHost")].toString());
+            m_currentStudio.setPort(serverState[QStringLiteral("serverPort")].toInt());
+            m_currentStudio.setSessionId(
+                serverState[QStringLiteral("sessionId")].toString());
+            completeConnection();
         }
-        reply->deleteLater();
-        ;
-    });
+    }
+
+    emit currentStudioChanged();
 }
 
-void VirtualStudio::endRetryPeriod()
+void VirtualStudio::restartStudioSocket()
 {
-    m_retryPeriod = false;
-    m_retryPeriodTimer.stop();
+    if (m_onConnectedScreen) {
+        if (!m_studioSocketPtr.isNull()) {
+            m_studioSocketPtr->openSocket();
+        }
+    }
 }
 
 void VirtualStudio::launchBrowser(const QUrl& url)
@@ -1047,127 +1427,95 @@ void VirtualStudio::updatedStats(const QJsonObject& stats)
     return;
 }
 
-void VirtualStudio::setupAuthenticator()
+void VirtualStudio::udpWaitingTooLong()
 {
-    if (m_authenticator.isNull()) {
-        // Set up our authorization flow
-        m_authenticator.reset(new QOAuth2AuthorizationCodeFlow);
-        m_authenticator->setScope(
-            QStringLiteral("openid profile email offline_access read:servers"));
-        connect(m_authenticator.data(),
-                &QOAuth2AuthorizationCodeFlow::authorizeWithBrowser, this,
-                &VirtualStudio::launchBrowser);
-
-        const QUrl authUri(QStringLiteral("https://auth.jacktrip.org/authorize"));
-        const QString clientId = QStringLiteral("cROUJag0UVKDaJ6jRAKRzlVjKVFNU39I");
-        const QUrl tokenUri(QStringLiteral("https://auth.jacktrip.org/oauth/token"));
-        const quint16 port = 52424;
-
-        m_authenticator->setAuthorizationUrl(authUri);
-        m_authenticator->setClientIdentifier(clientId);
-        m_authenticator->setAccessTokenUrl(tokenUri);
-
-        m_authenticator->setModifyParametersFunction([](QAbstractOAuth2::Stage stage,
-                                                        QVariantMap* parameters) {
-            if (stage == QAbstractOAuth2::Stage::RequestingAccessToken) {
-                QByteArray code = parameters->value(QStringLiteral("code")).toByteArray();
-                (*parameters)[QStringLiteral("code")] = QUrl::fromPercentEncoding(code);
-            } else if (stage == QAbstractOAuth2::Stage::RequestingAuthorization) {
-                parameters->insert(QStringLiteral("audience"),
-                                   QStringLiteral("https://api.jacktrip.org"));
-            }
-        });
-
-        QOAuthHttpServerReplyHandler* replyHandler =
-            new QOAuthHttpServerReplyHandler(port, this);
-        replyHandler->setCallbackText(QStringLiteral(
-            "<div id=\"container\" style=\"width:100%; max-width:1200px; height: auto; "
-            "margin: 100px auto; text-align:center;\">\n"
-            "<img src=\"https://files.jacktrip.org/logos/jacktrip_icon.svg\" "
-            "alt=\"JackTrip\">\n"
-            "<h1 style=\"font-size: 30px; font-weight: 600; padding-top:20px;\">Virtual "
-            "Studio Login Successful</h1>\n"
-            "<p style=\"font-size: 21px; font-weight:300;\">You may close this window "
-            "and return to the JackTrip application.</p>\n"
-            "</div>\n"));
-        m_authenticator->setReplyHandler(replyHandler);
-        connect(m_authenticator.data(), &QOAuth2AuthorizationCodeFlow::granted, this,
-                &VirtualStudio::slotAuthSucceded);
-        connect(m_authenticator.data(), &QOAuth2AuthorizationCodeFlow::requestFailed,
-                this, &VirtualStudio::slotAuthFailed);
-    }
+    if (m_devicePtr.isNull())
+        return;
+    m_networkOutageTimer.start();
+    m_devicePtr->setNetworkOutage(true);
+    emit updatedNetworkOutage(true);
 }
 
 void VirtualStudio::sendHeartbeat()
 {
-    if (m_device != nullptr && m_connectionState != "Connecting...") {
-        m_device->sendHeartbeat();
+    if (!m_devicePtr.isNull() && m_connectionState != "Connecting..."
+        && m_connectionState != "Preparing audio...") {
+        m_devicePtr->sendHeartbeat();
     }
 }
 
-void VirtualStudio::getServerList(bool firstLoad, int index)
+void VirtualStudio::resetState()
 {
-    {
-        QMutexLocker locker(&m_refreshMutex);
-        if (!m_allowRefresh || m_refreshInProgress) {
-            return;
-        } else {
-            m_refreshInProgress = true;
-        }
-    }
+    m_webChannelServer->close();
+    m_refreshTimer.stop();
+    m_heartbeatTimer.stop();
+    m_startTimer.stop();
+    m_networkOutageTimer.stop();
+    m_firstRefresh = true;
+}
+
+void VirtualStudio::getServerList(bool signalRefresh, int index)
+{
+    // only allow one thread to refresh at a time
+    QMutexLocker refreshLock(&m_refreshMutex);
+    if (m_refreshInProgress)
+        return;
+    m_refreshInProgress = true;
+    refreshLock.unlock();
 
     // Get the serverId of the server at the top of our screen if we know it
     QString topServerId;
-    if (index >= 0 && index < m_servers.count()) {
-        topServerId = static_cast<VsServerInfo*>(m_servers.at(index))->id();
+    if (index >= 0 && index < m_serverModel.count()) {
+        topServerId = m_serverModel.at(index)->id();
     }
 
-    QNetworkReply* reply =
-        m_authenticator->get(QStringLiteral("https://app.jacktrip.org/api/servers"));
-    connect(reply, &QNetworkReply::finished, this, [&, reply, topServerId, firstLoad]() {
-        if (reply->error() != QNetworkReply::NoError) {
-            std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-            emit authFailed();
-            reply->deleteLater();
-            return;
-        }
-
-        QByteArray response      = reply->readAll();
-        QJsonDocument serverList = QJsonDocument::fromJson(response);
-        if (!serverList.isArray()) {
-            std::cout << "Error: Not an array" << std::endl;
-            QMutexLocker locker(&m_refreshMutex);
-            m_refreshInProgress = false;
-            emit authFailed();
-            reply->deleteLater();
-            return;
-        }
-        QJsonArray servers = serverList.array();
-        // Divide our servers by category initially so that they're easier to sort
-        QList<QObject*> yourServers;
-        QList<QObject*> subServers;
-        QList<QObject*> pubServers;
-
-        for (int i = 0; i < servers.count(); i++) {
-            if (servers.at(i)[QStringLiteral("type")].toString().contains(
-                    QStringLiteral("JackTrip"))) {
-                VsServerInfo* serverInfo = new VsServerInfo(this);
-                serverInfo->setIsManageable(
-                    servers.at(i)[QStringLiteral("admin")].toBool());
-                QString status    = servers.at(i)[QStringLiteral("status")].toString();
-                bool activeStudio = status == QLatin1String("Ready");
-                bool hostedStudio = servers.at(i)[QStringLiteral("managed")].toBool();
-                // Only iterate through servers that we want to show
-                if (!m_showSelfHosted && !hostedStudio) {
-                    continue;
+    QNetworkReply* reply = m_api->getServers();
+    connect(
+        reply, &QNetworkReply::finished, this, [&, reply, topServerId, signalRefresh]() {
+            if (reply->error() != QNetworkReply::NoError) {
+                if (signalRefresh) {
+                    emit refreshFinished(index);
                 }
-                if (!m_showInactive && !activeStudio) {
-                    continue;
+                std::cerr << "Error: " << reply->errorString().toStdString() << std::endl;
+                reply->deleteLater();
+                QMutexLocker refreshLock(&m_refreshMutex);
+                m_refreshInProgress = false;
+                return;
+            }
+
+            QByteArray response      = reply->readAll();
+            QJsonDocument serverList = QJsonDocument::fromJson(response);
+            reply->deleteLater();
+            if (!serverList.isArray()) {
+                if (signalRefresh) {
+                    emit refreshFinished(index);
                 }
-                if (activeStudio || (serverInfo->isManageable() && m_showInactive)) {
+                std::cerr << "Error: Not an array" << std::endl;
+                QMutexLocker refreshLock(&m_refreshMutex);
+                m_refreshInProgress = false;
+                return;
+            }
+
+            QJsonArray servers = serverList.array();
+            // Divide our servers by category initially so that they're easier to sort
+            QVector<VsServerInfoPointer> yourServers;
+            QVector<VsServerInfoPointer> subServers;
+            QVector<VsServerInfoPointer> pubServers;
+            int skippedStudios = 0;
+
+            QMutexLocker refreshLock(&m_refreshMutex);  // protect m_servers
+            m_servers.clear();
+            for (int i = 0; i < servers.count(); i++) {
+                if (servers.at(i)[QStringLiteral("type")].toString().contains(
+                        QStringLiteral("JackTrip"))) {
+                    QSharedPointer<VsServerInfo> serverInfo(new VsServerInfo(this));
+                    serverInfo->setIsAdmin(
+                        servers.at(i)[QStringLiteral("admin")].toBool());
                     serverInfo->setName(servers.at(i)[QStringLiteral("name")].toString());
                     serverInfo->setHost(
                         servers.at(i)[QStringLiteral("serverHost")].toString());
+                    serverInfo->setIsManaged(
+                        servers.at(i)[QStringLiteral("managed")].toBool());
                     serverInfo->setStatus(
                         servers.at(i)[QStringLiteral("status")].toString());
                     serverInfo->setPort(
@@ -1187,122 +1535,132 @@ void VirtualStudio::getServerList(bool firstLoad, int index)
                     serverInfo->setId(servers.at(i)[QStringLiteral("id")].toString());
                     serverInfo->setSessionId(
                         servers.at(i)[QStringLiteral("sessionId")].toString());
-                    if (servers.at(i)[QStringLiteral("owner")].toBool()) {
-                        yourServers.append(serverInfo);
-                        serverInfo->setSection(VsServerInfo::YOUR_STUDIOS);
+                    serverInfo->setInviteKey(
+                        servers.at(i)[QStringLiteral("inviteKey")].toString());
+                    serverInfo->setCloudId(
+                        servers.at(i)[QStringLiteral("cloudId")].toString());
+                    serverInfo->setEnabled(
+                        servers.at(i)[QStringLiteral("enabled")].toBool());
+                    serverInfo->setIsOwner(
+                        servers.at(i)[QStringLiteral("owner")].toBool());
+
+                    // Always add servers to m_servers
+                    m_servers.append(serverInfo);
+
+                    // Only add servers to the model that we want to show
+                    if (serverInfo->isAdmin() || serverInfo->isOwner()) {
+                        if (filterStudio(*serverInfo)) {
+                            ++skippedStudios;
+                        } else {
+                            yourServers.append(serverInfo);
+                            serverInfo->setSection(VsServerInfo::YOUR_STUDIOS);
+                        }
                     } else if (m_subscribedServers.contains(serverInfo->id())) {
-                        subServers.append(serverInfo);
-                        serverInfo->setSection(VsServerInfo::SUBSCRIBED_STUDIOS);
+                        if (filterStudio(*serverInfo)) {
+                            ++skippedStudios;
+                        } else {
+                            subServers.append(serverInfo);
+                            serverInfo->setSection(VsServerInfo::SUBSCRIBED_STUDIOS);
+                        }
                     } else {
-                        pubServers.append(serverInfo);
+                        if (!filterStudio(*serverInfo)) {
+                            pubServers.append(serverInfo);
+                            serverInfo->setSection(VsServerInfo::PUBLIC_STUDIOS);
+                        }
+                        // don't count public studios in skipped count
                     }
                 }
             }
-        }
+            refreshLock.unlock();
 
-        std::sort(yourServers.begin(), yourServers.end(),
-                  [](QObject* first, QObject* second) {
-                      return static_cast<VsServerInfo*>(first)->name()
-                             < static_cast<VsServerInfo*>(second)->name();
-                  });
-        std::sort(subServers.begin(), subServers.end(),
-                  [](QObject* first, QObject* second) {
-                      return static_cast<VsServerInfo*>(first)->name()
-                             < static_cast<VsServerInfo*>(second)->name();
-                  });
-        std::sort(pubServers.begin(), pubServers.end(),
-                  [](QObject* first, QObject* second) {
-                      return static_cast<VsServerInfo*>(first)->name()
-                             < static_cast<VsServerInfo*>(second)->name();
-                  });
+            // sort studios in each section by name
+            auto serverSorter = [](VsServerInfoPointer first,
+                                   VsServerInfoPointer second) {
+                return *first < *second;
+            };
+            std::sort(yourServers.begin(), yourServers.end(), serverSorter);
+            std::sort(subServers.begin(), subServers.end(), serverSorter);
+            std::sort(pubServers.begin(), pubServers.end(), serverSorter);
 
-        // If we don't have any owned servers, move the JackTrip logo to an appropriate
-        // section header.
-        if (yourServers.isEmpty()) {
-            if (subServers.isEmpty()) {
-                m_logoSection = QStringLiteral("Public Studios");
+            // If we don't have any owned servers, move the JackTrip logo to an
+            // appropriate section header.
+            if (yourServers.isEmpty()) {
+                if (subServers.isEmpty()) {
+                    m_logoSection = QStringLiteral("Public Studios");
+
+                    if (skippedStudios == 0) {
+                        // This is a new user
+                        setShowCreateStudio(true);
+                    } else {
+                        // This is not a new user. One or more studios were filtered.
+                        setShowCreateStudio(false);
+                    }
+                } else {
+                    m_logoSection = QStringLiteral("Subscribed Studios");
+                }
             } else {
-                m_logoSection = QStringLiteral("Subscribed Studios");
+                m_logoSection = QStringLiteral("Your Studios");
             }
             emit logoSectionChanged();
-        } else {
-            m_logoSection = QStringLiteral("Your Studios");
-            emit logoSectionChanged();
-        }
 
-        QMutexLocker locker(&m_refreshMutex);
-        // Check that we haven't tried connecting to a server between the
-        // request going out and the response.
-        if (!m_allowRefresh) {
-            m_refreshInProgress = false;
-            return;
-        }
-        m_servers.clear();
-        m_servers.append(yourServers);
-        m_servers.append(subServers);
-        m_servers.append(pubServers);
-        m_view.engine()->rootContext()->setContextProperty(
-            QStringLiteral("serverModel"), QVariant::fromValue(m_servers));
-        int index = -1;
-        if (!topServerId.isEmpty()) {
-            for (int i = 0; i < m_servers.count(); i++) {
-                if (static_cast<VsServerInfo*>(m_servers.at(i))->id() == topServerId) {
-                    index = i;
-                    break;
+            m_serverModel.clear();
+            for (const VsServerInfoPointer& s : yourServers) {
+                m_serverModel.append(s.get());
+            }
+            for (const VsServerInfoPointer& s : subServers) {
+                m_serverModel.append(s.get());
+            }
+            for (const VsServerInfoPointer& s : pubServers) {
+                m_serverModel.append(s.get());
+            }
+            emit serverModelChanged();
+            int index = -1;
+            if (!topServerId.isEmpty()) {
+                for (int i = 0; i < m_serverModel.count(); i++) {
+                    if (m_serverModel.at(i)->id() == topServerId) {
+                        index = i;
+                        break;
+                    }
                 }
             }
-        }
-        if (firstLoad) {
-            emit authSucceeded();
-            emit refreshFinished(index);
-            m_refreshTimer.setInterval(10000);
-            m_refreshTimer.start();
-            m_heartbeatTimer.setInterval(5000);
-            m_heartbeatTimer.start();
-        } else {
-            emit refreshFinished(index);
-        }
-
-        m_refreshInProgress = false;
-
-        reply->deleteLater();
-    });
+            if (m_firstRefresh) {
+                m_refreshTimer.setInterval(5000);
+                m_refreshTimer.start();
+                m_heartbeatTimer.setInterval(5000);
+                m_heartbeatTimer.start();
+                m_firstRefresh = false;
+            }
+            m_refreshInProgress = false;
+            if (signalRefresh) {
+                emit refreshFinished(index);
+            }
+        });
 }
 
-void VirtualStudio::getUserId()
+bool VirtualStudio::filterStudio(const VsServerInfo& serverInfo) const
 {
-    QNetworkReply* reply =
-        m_authenticator->get(QStringLiteral("https://auth.jacktrip.org/userinfo"));
-    connect(reply, &QNetworkReply::finished, this, [=]() {
-        if (reply->error() != QNetworkReply::NoError) {
-            std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-            emit authFailed();
-            reply->deleteLater();
-            return;
-        }
-
-        QByteArray response    = reply->readAll();
-        QJsonDocument userInfo = QJsonDocument::fromJson(response);
-        m_userId               = userInfo.object()[QStringLiteral("sub")].toString();
-
-        QSettings settings;
-        settings.beginGroup(QStringLiteral("VirtualStudio"));
-        settings.setValue(QStringLiteral("UserId"), m_userId);
-        settings.endGroup();
-        getSubscriptions();
-        reply->deleteLater();
-    });
+    // Return true if we want to filter the studio out of the display model
+    bool activeStudio = serverInfo.status() == QLatin1String("Ready");
+    bool hostedStudio = serverInfo.isManaged();
+    if (!m_showSelfHosted && !hostedStudio) {
+        return true;
+    }
+    if (!m_showInactive && !activeStudio) {
+        return true;
+    }
+    return false;
 }
 
 void VirtualStudio::getSubscriptions()
 {
-    QNetworkReply* reply = m_authenticator->get(
-        QStringLiteral("https://app.jacktrip.org/api/users/%1/subscriptions")
-            .arg(m_userId));
+    if (m_userId.isEmpty()) {
+        qDebug() << "Invalid user ID";
+        return;
+    }
+    QNetworkReply* reply = m_api->getSubscriptions(m_userId);
     connect(reply, &QNetworkReply::finished, this, [&, reply]() {
         if (reply->error() != QNetworkReply::NoError) {
             std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-            emit authFailed();
             reply->deleteLater();
             return;
         }
@@ -1311,28 +1669,25 @@ void VirtualStudio::getSubscriptions()
         QJsonDocument subscriptionList = QJsonDocument::fromJson(response);
         if (!subscriptionList.isArray()) {
             std::cout << "Error: Not an array" << std::endl;
-            emit authFailed();
             reply->deleteLater();
             return;
         }
+        m_subscribedServers.clear();
         QJsonArray subscriptions = subscriptionList.array();
         for (int i = 0; i < subscriptions.count(); i++) {
-            m_subscribedServers.append(
-                subscriptions.at(i)[QStringLiteral("serverId")].toString());
+            m_subscribedServers.insert(
+                subscriptions.at(i)[QStringLiteral("serverId")].toString(), true);
         }
-        getServerList(true);
         reply->deleteLater();
     });
 }
 
 void VirtualStudio::getRegions()
 {
-    QNetworkReply* reply = m_authenticator->get(
-        QStringLiteral("https://app.jacktrip.org/api/users/%1/regions").arg(m_userId));
+    QNetworkReply* reply = m_api->getRegions(m_userId);
     connect(reply, &QNetworkReply::finished, this, [&, reply]() {
         if (reply->error() != QNetworkReply::NoError) {
             std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-            emit authFailed();
             reply->deleteLater();
             return;
         }
@@ -1345,12 +1700,10 @@ void VirtualStudio::getRegions()
 
 void VirtualStudio::getUserMetadata()
 {
-    QNetworkReply* reply = m_authenticator->get(
-        QStringLiteral("https://app.jacktrip.org/api/users/%1").arg(m_userId));
+    QNetworkReply* reply = m_api->getUser(m_userId);
     connect(reply, &QNetworkReply::finished, this, [&, reply]() {
         if (reply->error() != QNetworkReply::NoError) {
             std::cout << "Error: " << reply->errorString().toStdString() << std::endl;
-            emit authFailed();
             reply->deleteLater();
             return;
         }
@@ -1361,41 +1714,16 @@ void VirtualStudio::getUserMetadata()
     });
 }
 
-#ifdef RT_AUDIO
-void VirtualStudio::getDeviceList(QStringList* list, bool isInput)
-{
-    RtAudio audio;
-    list->clear();
-    list->append(QStringLiteral("(default)"));
-
-    unsigned int devices = audio.getDeviceCount();
-    RtAudio::DeviceInfo info;
-    for (unsigned int i = 0; i < devices; i++) {
-        info = audio.getDeviceInfo(i);
-        if (info.probed == true) {
-            if (isInput && info.inputChannels > 0) {
-                list->append(QString::fromStdString(info.name));
-            } else if (!isInput && info.outputChannels > 0) {
-                list->append(QString::fromStdString(info.name));
-            }
-        }
-    }
-}
-#endif
-
 void VirtualStudio::stopStudio()
 {
-    if (m_currentStudio < 0) {
+    if (m_currentStudio.id() == "") {
         return;
     }
 
-    VsServerInfo* studioInfo = static_cast<VsServerInfo*>(m_servers.at(m_currentStudio));
-    QJsonObject json         = {{QLatin1String("enabled"), false}};
-    QJsonDocument request    = QJsonDocument(json);
-    studioInfo->setHost(QLatin1String(""));
-    QNetworkReply* reply = m_authenticator->put(
-        QStringLiteral("https://app.jacktrip.org/api/servers/%1").arg(studioInfo->id()),
-        request.toJson());
+    QJsonObject json      = {{QLatin1String("enabled"), false}};
+    QJsonDocument request = QJsonDocument(json);
+    m_currentStudio.setHost(QLatin1String(""));
+    QNetworkReply* reply = m_api->updateServer(m_currentStudio.id(), request.toJson());
     connect(reply, &QNetworkReply::finished, this, [=]() {
         if (m_isExiting && !m_jackTripRunning) {
             emit signalExit();
@@ -1404,11 +1732,23 @@ void VirtualStudio::stopStudio()
     });
 }
 
+bool VirtualStudio::readyToJoin()
+{
+    // FTUX shows warnings and device setup views
+    // if any of these enabled, do not immediately join
+    return m_windowState == "connected"
+           && (m_connectionState == QStringLiteral("Waiting...")
+               || m_connectionState == QStringLiteral("Disconnected"));
+}
+
+void VirtualStudio::detectedFeedbackLoop()
+{
+    emit feedbackDetected();
+}
+
 VirtualStudio::~VirtualStudio()
 {
-    for (int i = 0; i < m_servers.count(); i++) {
-        delete m_servers.at(i);
-    }
-
     QDesktopServices::unsetUrlHandler("jacktrip");
+    // stop the audio worker thread before destructing other things
+    m_audioConfigPtr.reset();
 }

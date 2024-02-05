@@ -1,0 +1,41 @@
+{
+    "app-id": "org.jacktrip.JackTrip",
+    "runtime": "org.kde.Platform",
+    "runtime-version": "6.6",
+    "sdk": "org.kde.Sdk",
+    "base": "io.qt.qtwebengine.BaseApp",
+    "base-version": "6.6",
+    "command": "jacktrip",
+    "finish-args": [
+        "--share=ipc",
+        "--socket=wayland",
+        "--socket=fallback-x11",
+        "--device=dri",
+        "--share=network",
+        "--filesystem=xdg-run/pipewire-0",
+        "--env=PIPEWIRE_LATENCY=128/48000",
+        "--env=QML_IMPORT_PATH=/app/qml",
+        "--env=QT_QUICK_CONTROLS_STYLE=universal"
+    ],
+    "cleanup": [
+        "/lib/python3.10",
+        "/share/man"
+    ],
+    "modules": [
+        "pypi-dependencies.json",
+        {
+            "name": "jacktrip",
+            "buildsystem": "meson",
+            "config-opts": [
+                "-Dbuildtype=debugoptimized",
+                "-Dpkg_config_path=/app/lib/x86_64-linux-gnu/pkgconfig"
+            ],
+            "sources": [
+                {
+                    "type": "dir",
+                    "path": "../../"
+                }
+            ]
+        }
+    ]
+}

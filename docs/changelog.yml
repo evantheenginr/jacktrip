@@ -1,3 +1,246 @@
+- Version: "2.2.1"
+  Date: 2024-01-29
+  Description:
+  - (fixed) Sample rate issues with certain Windows ASIO drivers
+- Version: "2.2.0"
+  Date: 2024-01-22
+  Description:
+  - (updated) Improved support for different input and output devices
+  - (updated) Various latency improvements for packet loss concealment
+  - (updated) VS Mode make it easier to dismiss the user feedback dialog
+  - (updated) VS Mode error message for disconnected audio interfaces
+  - (fixed) VS Mode broken deeplinks when studio doesn't match filters
+  - (fixed) VS Mode refused to connect to studios not 48khz
+  - (fixed) VS Mode showed wrong devices selected when connected
+- Version: "2.1.0"
+  Date: 2023-11-06
+  Description:
+  - (added) VS Mode ability to create studios without a web browser
+  - (added) VS Mode improved network stability notifications
+  - (added) VS Mode dialog when QML plugins are missing
+  - (updated) VS Mode video improvements on Windows
+  - (updated) Packet loss concealment latency and quality improvements
+  - (fixed) Packet loss concealment glitches when buffer sizes don't match
+  - (fixed) VS Mode ensure that the app is disconnected at startup
+  - (fixed) Invalid escape sequence in Linux desktop file
+  - (fixed) VS Mode unable to change update channel
+- Version: "2.0.2"
+  Date: 2023-09-01
+  Description:
+  - (added) VS Mode latency categories for Linux audio devices
+  - (added) VS Mode audio warnings for high latency Linux devices
+  - (updated) Improved support for Pipewire latency on Linux
+  - (fixed) Crash on Windows when using the JACK audio backend
+  - (fixed) Include ALSA support for Linux builds using meson
+  - (fixed) VS Mode overlapping UI elements with max scaling
+  - (fixed) Don't require git to be present for meson builds
+  - (fixed) Linux man page description and meson build errors
+- Version: "2.0.1"
+  Date: 2023-08-29
+  Description:
+  - (fixed) VS Mode Mix to Mono setting was sending a buzzing noise
+  - (fixed) VS Mode Logout followed by Login was breaking network stats
+  - (fixed) Device names with special characters work again
+- Version: "2.0.0"
+  Date: 2023-08-28
+  Description:
+  - (added) VS Mode integrated video and other UI updates
+  - (added) VS support for refreshing devices while connected to studio
+  - (added) VS feedback survey request after leaving studios
+  - (added) VS Mode improved warnings for high latency audio devices
+  - (added) VS Mode improved getting started recommendations
+  - (updated) official builds now use Qt 6 and RtAudio 6
+  - (updated) official Windows builds now use schannel and MSVC
+  - (updated) Simple-FFT dependency copied into source tree
+  - (updated) Improved user experience when using the RtAudio backend
+  - (fixed) Crashes when audio interfaces don't support buffer size
+  - (fixed) Crashes when audio interfaces are unplugged while active
+  - (fixed) Blacklisting Steinberg Generic ASIO driver due to crashes
+  - (fixed) Bugs with Virtual Studio deep links and connections stats
+  - (fixed) VS Settings will now revert back when Cancel is selected
+  - (fixed) VS Mode device levels no longer reset on first registration
+- Version: "1.10.1"
+  Date: 2023-08-03
+  Description:
+  - (fixed) VS Mode crashes involving ASIO device selection
+- Version: "1.10.0"
+  Date: 2023-06-16
+  Description:
+  - (added) VS Mode automatically mute when feedback is detected
+  - (added) VS Mode - notify people of network outages
+  - (updated) PLC optimizations for slower hardware devices
+  - (updated) VS Mode volume meter performance improvements
+  - (updated) VS Mode login no longer listens on a local port
+  - (updated) VS Mode improved clarity of startup messages
+  - (fixed) Windows crash caused by Realtek ASIO driver
+  - (fixed) More friendly message for Windows Terminal bug
+  - (fixed) Faster startup by reducing and deferring audio interface scans
+  - (fixed) Switching from VS to Classic mode leaves audio open
+- Version: "1.9.0"
+  Date: 2023-05-05
+  Description:
+  - (added) buffer strategy 4 to run PLC in audio callback
+  - (added) VS Mode - change audio devices while connected
+  - (added) universal binary for macOS
+  - (added) tooltips, sliders, and positioning of connected interface
+  - (added) emails for vulnerability reporting
+  - (added) local monitoring
+  - (added) VS mode - Error message when single studio limit reached
+  - (updated) regulator thread uses real-time priority
+  - (updated) VS mode - use buffer strategy 4
+  - (updated) VS mode - Default to PLC
+  - (updated) VS Mode - PLC auto queue has 5ms headroom
+  - (updated) Enforcing using the same ASIO device on Windows
+  - (updated) VS Mode - JTL builds hide the yes/no screen on first launch
+  - (updated) GHA - wait for static Qt builds rather than failing
+  - (updated) VS Mode - "all devices" is now "high latency"
+  - (updated) VS Mode - Warning text for non-ASIO Windows devices
+  - (updated) Faust-generate code moved out of headers
+  - (fixed) PLC bugs
+  - (fixed) VS Mode - changing devices while connected refreshes device lists
+  - (fixed) play test tone on Linux
+  - (fixed) static openssl on Linux
+- Version: "1.8.1"
+  Date: 2023-03-29
+  Description:
+  - (added) VS mode - tooltips to explain input and output device
+  - (added) buffer size and sample rate now settable with Pipewire
+  - (added) VS mode - link to create a studio on the login complete page
+  - (fixed) Device names with special characters work again
+  - (fixed) undefine boolean error
+  - (fixed) VS Mode - Audio settings correctly show the selected device
+  - (fixed) VS Mode - Refresh button doesn't crash Windows any more
+  - (fixed) VS Mode - Output channel selections save correctly
+  - (updated) documentation styling
+  - (updated) removed ipify from VS mode
+  - (updated) ip check can now function with only IPv6
+  - (updated) cleaned up vsinit class
+- Version: "1.8.0"
+  Date: 2023-03-01
+  Description:
+  - (added) Qt version option for Meson builds
+  - (added) GHA builds now include static preview docs
+  - (added) when using the classic GUI, command line options are now parsed
+  - (added) VS mode - Selecting and configuring device channels
+  - (added) Classic mode - Warning for machines without JACK installed
+  - (added) VS mode - high latency warning for non-ASIO devices
+  - (added) Meson build without rtaudio in GHA
+  - (updated) icons in VS mode 
+  - (updated) Linux builds now use Qt 5.15.8
+  - (updated) Replaced QVector in meter code
+  - (updated) Removed set-output from GHA scripts for deprecation
+  - (updated) Automated the auto-updater release process
+  - (updated) RtAudio is included in Linux binary releases
+  - (updated) text on audio setup confirm button when using deeplink
+  - (updated) VS Mode - improved first-time signin
+  - (updated) Flathub - improve latency by defaulting to 256 samples buffer size
+  - (fixed) ambiguous call to overloaded function in Qt6
+  - (fixed) issue where selected devices were not the devices used for output
+  - (fixed) crash when using Classic mode and CLI w/ JACK
+  - (fixed) ipify issue with Norton
+  - (fixed) compiler warnings when building without RtAudio
+  - (fixed) VS Mode - refresh button behavior on settings page
+- Version: "1.7.1"
+  Date: 2023-02-03
+  Description:
+  - (added) missing QuickControl2 dependency
+  - (added) documentation preview in build steps
+  - (added) README text about PPA and Debian backports
+  - (updated) upgraded to Qt 5.15.3
+  - (updated) linux package dependencies
+  - (updated) JackTrip now uses a random available port when connecting
+  - (updated) VS mode - Audio settings screen layouts
+  - (fixed) VS mode - video button is now available to all users of a Studio
+  - (fixed) A few memory leaks
+  - (fixed) linux static builds
+- Version: "1.7.0"
+  Date: 2023-01-20
+  Description:
+  - (added) VS Mode - Start and join inactive studios
+  - (added) JackTrip now prints build info on running from console
+  - (added) VS Mode - supports changing output volume from the server
+  - (added) VS Mode - Link to video on VS web when connected
+  - (updated) signing now happens in the main build workflow
+  - (updated) VS mode sorts active studios above inactive studios
+  - (updated) cmake build
+  - (updated) meson builds will fail if no backend is enabled
+  - (updated) replaced many ifdefs with if constexpr
+  - (updated) After signing out of VS mode, you will be asked to sign back in on the web
+  - (fixed) network stats failing after studio start
+  - (fixed) occasional immediate disconnects
+  - (fixed) segfault issue due to ifdefs
+  - (fixed) Hanging UI on Windows
+  - (fixed) turned a comment warning into an appropriate error
+  - (fixed) VS Mode - Join issue withs studios started in app
+  - (fixed) hanging app after refreshing studios
+  - (fixed) VS Mode - TCP 19 error after starting a studio
+- Version: "1.6.8"
+  Date: 2022-12-05
+  Description:
+  - (fixed) broken "Yes" button on launch
+  - (fixed) window resizing issues
+  - (fixed) subscribed studios showing up under Public in VS mode
+- Version: "1.6.7"
+  Date: 2022-11-03
+  Description:
+  - (added) volume meters in classic mode
+  - (added) release-acquire ordering for Regular
+  - (added) audio driver support article in VS mode
+  - (added) regulatorthread
+  - (added) studios page first time UI
+  - (added) non-asio audio devices can be used on windows
+  - (updated) dependency list in documentation
+  - (updated) windows opens jacktrip after install
+  - (updated) Move to overlapped I/O for Windows Networking
+  - (updated) New default device behavior in Virtual Studio mode
+  - (fixed) opening links from Virtual Studio
+  - (fixed) send capture volume as int
+  - (fixed) connection issues for servers without reverse dns
+  - (fixed) flatpak build errors
+  - (fixed) ventura updater crash
+  - (fixed) uninitialized delete issue
+  - (remvoed) extraneous call to readSlotNonBlocking
+- Version: "1.6.6"
+  Date: 2022-11-01
+  Description:
+  - (fixed) Notarization scripts for macOS
+  - Note - this version replaces 1.6.5, as that release was mistakenly deleted
+- Version: "1.6.5"
+  Date: 2022-10-28
+  Description:
+  - (added) Input/output volume control and input mute in VS
+  - (added) Volume plugin
+  - (added) Linux manifests used for download links
+  - (added) VS Test mode for jacktrip.org users
+  - (added) Qt6 support for NO_VS builds
+  - (added) Show Qt version in About dialog
+  - (updated) VS - makes inactive, admin'd studios visible by default
+  - (updated) using -q auto3 for buffer length with plc
+  - (updated) updated notarization process to use notarytool
+  - (updated) link to Qt source as it has changed
+  - (updated) Classic GUI reverts some pre-VS changes
+  - (updated) QMake build scripts more in line with documentation
+  - (fixed) new user screen in VS mode
+  - (fixed) logout freezing jacktrip
+  - (fixed) NO_VS builds work without setting NO_UPDATER
+  - (fixed) volume meter-related crash
+- Version: "1.6.4"
+  Date: 2022-09-16
+  Description:
+  - (added) Volume meters when connected to a Studio in VS mode
+  - (added) Validation of Linux desktop file in build steps
+  - (added) a copy invite link button to VS mode Studios
+  - (added) an advanced setting for buffer strategy in VS mode
+  - (updated) PLC workers now zero out the last good packet from stalled clients
+  - (updated) PLC distinguish stuck clients
+  - (updated) Fedora meson dependencies
+  - (fixed) UI is usable when Studio list in empty in VS mode
+  - (fixed) Crashing when unplugging a device while connected and using JACK
+  - (fixed) Launching from URL skipped setup
+  - (fixed) UI hanging when connecting to Studios in VS mode
+  - (fixed) "Refresh list" button disabling ui interaction in VS mode
+  - (fixed) Network stats not displaying on first connect after login (VS mode)
+  - (fixed) VS mode won't join studios when on warning or device setup screens
 - Version: "1.6.3"
   Date: 2022-08-23
   Description:
@@ -8,7 +251,7 @@
   Date: 2022-08-05
   Description:
   - (updated) Static Qt version for Linux builds
-  - (upated) cleaner, easier to read VS settings
+  - (updated) cleaner, easier to read VS settings
   - (updated) icons for 'Manage' and 'Settings' in VS mode
   - (added) human-readable locations in VS mode
   - (added) warning that cmake is not officially supported

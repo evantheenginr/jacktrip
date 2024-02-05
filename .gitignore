@@ -22,6 +22,15 @@ macos/*.app
 macos/package/build
 macos/package/*.pkgproj
 macos/package/*.txt
+macos/build_installer.sh
+macos/remove-creds.patch
+macos/sign-stuff-withcreds.sh
 
 # windows deploy files
 win/deploy
+
+# meson subproject files
+subprojects/packagecache/
+subprojects/rtaudio-5.*/
+subprojects/rtaudio-6.*/
+subprojects/wingetopt/

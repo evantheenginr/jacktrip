@@ -2,10 +2,10 @@
 # Created by Juan-Pablo Caceres
 #******************************
 
-CONFIG += c++11 console
+CONFIG += c++17 console
 CONFIG -= app_bundle
 
-CONFIG += qt thread debug_and_release build_all
+CONFIG += qt thread debug_and_release build_all qtquickcompiler
 CONFIG(debug, debug|release) {
     TARGET = jacktrip_debug
     application_id = 'org.jacktrip.JackTrip.Devel'
@@ -15,6 +15,8 @@ CONFIG(debug, debug|release) {
     application_id = 'org.jacktrip.JackTrip'
     name_suffix = ''
 }
+QMAKE_CFLAGS_RELEASE += -DNDEBUG
+QMAKE_CXXFLAGS_RELEASE += -DNDEBUG
 
 equals(QT_EDITION, "OpenSource") {
   DEFINES += QT_OPENSOURCE
@@ -29,11 +31,16 @@ nogui {
   novs {
     DEFINES += NO_VS
   } else {
-    QT += networkauth
     QT += qml
     QT += quick
+    QT += quickcontrols2
     QT += svg
     QT += websockets
+    QT += webview
+    QT += webenginequick
+    vsftux {
+      DEFINES += VS_FTUX
+    }
   }
   noupdater|linux-g++|linux-g++-64 {
     DEFINES += NO_UPDATER
@@ -62,6 +69,7 @@ nojack {
 # INCLUDEPATH+=/usr/include/stk
 # LIBS += -L/usr/local/lib -ljack -lstk -lm
   LIBS += -L/usr/local/lib -lm
+  QMAKE_CXXFLAGS += -fvisibility=hidden -fvisibility-inlines-hidden
   weakjack {
     message(Building with weak linking of JACK)
     INCLUDEPATH += externals/weakjack
@@ -95,7 +103,7 @@ bundled_rtaudio {
     PKGCONFIG += rtaudio
     win32 {
       # even though we get linker flags from pkg-config, define -lrtaudio again to enforce linking order
-      CONFIG += no_lflags_merge    
+      CONFIG += no_lflags_merge
       LIBS += -lrtaudio -lole32 -lwinmm -lksuser -lmfplat -lmfuuid -lwmcodecdspuuid # -ldsound # -ldsound only needed if rtaudio is built with directsound support
     }
   }
@@ -103,41 +111,40 @@ bundled_rtaudio {
 
 macx {
   message(Building on MAC OS X)
-  QMAKE_MACOSX_DEPLOYMENT_TARGET = 10.9
-  #QMAKE_MAC_SDK = macosx10.9
   CONFIG -= app_bundle
-  #CONFIG += x86 #ppc #### If you have both libraries installed, you
-  # can change between 32bits (x86) or 64bits(x86_64) Change this to go back to 32 bits (x86)
   LIBS += -framework CoreAudio -framework CoreFoundation
   !nogui {
     LIBS += -framework Foundation
     CONFIG += objective_c
+    !novs {
+      LIBS += -framework AVFoundation -framework WebKit
+    }
   }
 }
 
 linux-g++ | linux-g++-64 {
-  
+
   FEDORA = $$system(cat /proc/version | grep -o fc)
-  
+
   contains( FEDORA, fc): {
     message(building on fedora)
   }
-  
+
   UBUNTU = $$system(cat /proc/version | grep -o Ubuntu)
-  
+
   contains( UBUNTU, Ubuntu): {
     message(building on  Ubuntu)
-    
+
     # workaround for Qt bug under ubuntu 18.04
     # gcc version 7.3.0 (Ubuntu 7.3.0-16ubuntu3)
     # QMake version 3.1
     # Using Qt version 5.9.5 in /usr/lib/x86_64-linux-gnu
     INCLUDEPATH += /usr/include/x86_64-linux-gnu/c++/7
-    
+
     # sets differences from original fedora version
     DEFINES += __UBUNTU__
   }
-  
+
   QMAKE_CXXFLAGS += -g -O2
 }
 
@@ -152,7 +159,7 @@ linux-g++-64 {
 win32 {
   message(Building on win32)
 #cc  CONFIG += x86 console
-  CONFIG += c++11 console
+  CONFIG += c++17 console
   exists("C:\Program Files\JACK2") {
     message("using Jack in C:\Program Files\JACK2")
     INCLUDEPATH += "C:\Program Files\JACK2\include"
@@ -200,12 +207,20 @@ INSTALLS += target
 # Input
 HEADERS += src/DataProtocol.h \
            src/JackTrip.h \
+           src/Analyzer.h \
            src/Effects.h \
            src/Compressor.h \
            src/CompressorPresets.h \
            src/Limiter.h \
            src/Regulator.h \
+           src/WaitFreeRingBuffer.h \
+           src/WaitFreeFrameBuffer.h \
            src/Reverb.h \
+           src/Meter.h \
+           src/Monitor.h \
+           src/Volume.h \
+           src/Tone.h \
+           src/StereoToMono.h \
            src/AudioTester.h \
            src/jacktrip_globals.h \
            src/jacktrip_types.h \
@@ -223,6 +238,9 @@ HEADERS += src/DataProtocol.h \
            src/compressordsp.h \
            src/limiterdsp.h \
            src/freeverbdsp.h \
+           src/meterdsp.h \
+           src/volumedsp.h \
+           src/tonedsp.h \
            src/SslServer.h \
            src/Auth.h
 #(Removed JackTripThread.h JackTripWorkerMessages.h NetKS.h TestRingBuffer.h ThreadPoolTest.h)
@@ -237,16 +255,23 @@ HEADERS += src/DataProtocol.h \
   HEADERS += src/gui/about.h \
              src/gui/messageDialog.h \
              src/gui/qjacktrip.h \
-             src/gui/textbuf.h
+             src/gui/textbuf.h \
+             src/gui/vuMeter.h
   !novs {
     HEADERS += src/gui/virtualstudio.h \
+               src/gui/vsApi.h \
+               src/gui/vsAuth.h \
+               src/gui/vsDeviceCodeFlow.h \
+               src/gui/vsDeeplink.h \
                src/gui/vsDevice.h \
+               src/gui/vsAudio.h \
                src/gui/vsServerInfo.h \
                src/gui/vsQuickView.h \
                src/gui/vsWebSocket.h \
+               src/gui/vsPermissions.h \
                src/gui/vsPinger.h \
                src/gui/vsPing.h \
-               src/gui/vsUrlHandler.h \
+               src/gui/vsQmlClipboard.h \
                src/JTApplication.h
   }
   !noupdater:!linux-g++:!linux-g++-64 {
@@ -263,10 +288,16 @@ rtaudio|bundled_rtaudio {
 
 SOURCES += src/DataProtocol.cpp \
            src/JackTrip.cpp \
+           src/Analyzer.cpp \
            src/Compressor.cpp \
            src/Limiter.cpp \
            src/Regulator.cpp \
            src/Reverb.cpp \
+           src/Meter.cpp \
+           src/Monitor.cpp \
+           src/StereoToMono.cpp \
+           src/Volume.cpp \
+           src/Tone.cpp \
            src/AudioTester.cpp \
            src/jacktrip_globals.cpp \
            src/JackTripWorker.cpp \
@@ -293,16 +324,22 @@ SOURCES += src/DataProtocol.cpp \
   SOURCES += src/gui/messageDialog.cpp \
              src/gui/qjacktrip.cpp \
              src/gui/about.cpp \
-             src/gui/textbuf.cpp
+             src/gui/textbuf.cpp \
+             src/gui/vuMeter.cpp
   !novs {
     SOURCES += src/gui/virtualstudio.cpp \
+               src/gui/vsApi.cpp \
+               src/gui/vsAuth.cpp \
+               src/gui/vsDeviceCodeFlow.cpp \
+               src/gui/vsDeeplink.cpp \
                src/gui/vsDevice.cpp \
+               src/gui/vsAudio.cpp \
                src/gui/vsServerInfo.cpp \
                src/gui/vsQuickView.cpp \
                src/gui/vsWebSocket.cpp \
+               src/gui/vsPermissions.cpp \
                src/gui/vsPinger.cpp \
-               src/gui/vsPing.cpp \
-               src/gui/vsUrlHandler.cpp
+               src/gui/vsPing.cpp
   }
   !noupdater:!linux-g++:!linux-g++-64 {
     SOURCES += src/dblsqd/feed.cpp \
@@ -316,8 +353,14 @@ SOURCES += src/DataProtocol.cpp \
   macx {
     HEADERS += src/gui/NoNap.h
     OBJECTIVE_SOURCES += src/gui/NoNap.mm
+    !novs {
+      HEADERS += src/gui/vsMacPermissions.h
+      OBJECTIVE_SOURCES += src/gui/vsMacPermissions.mm
+    }
   }
-  FORMS += src/gui/qjacktrip.ui src/gui/about.ui src/gui/messageDialog.ui
+  FORMS += src/gui/qjacktrip.ui \
+           src/gui/about.ui \
+           src/gui/messageDialog.ui
   novs {
     RESOURCES += src/gui/qjacktrip_novs.qrc
   } else {

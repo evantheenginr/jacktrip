@@ -48,7 +48,8 @@ class JitterBuffer : public RingBuffer
                  int channels, int bit_res);
     virtual ~JitterBuffer() {}
 
-    virtual bool insertSlotNonBlocking(const int8_t* ptrToSlot, int len, int lostLen);
+    virtual bool insertSlotNonBlocking(const int8_t* ptrToSlot, int len, int lostLen,
+                                       int seq_num);
     virtual void readSlotNonBlocking(int8_t* ptrToReadSlot);
     virtual void readBroadcastSlot(int8_t* ptrToReadSlot);
 
@@ -79,7 +80,10 @@ class JitterBuffer : public RingBuffer
     uint32_t mLastCorrCounter;
     int mLastCorrDirection;
     double mMinLevelThreshold;
-    double lastCorrFactor() const { return 500.0 / std::max(500U, mLastCorrCounter); }
+    double lastCorrFactor() const
+    {
+        return 500.0 / std::max<uint32_t>(500U, mLastCorrCounter);
+    }
 
     int mAutoQueue;
     double mAutoQueueCorr;

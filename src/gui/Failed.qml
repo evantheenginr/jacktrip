@@ -1,16 +1,15 @@
-import QtQuick 2.12
-import QtQuick.Controls 2.12
-import QtGraphicalEffects 1.12
+import QtQuick
+import QtQuick.Controls
 
 Item {
     width: parent.width; height: parent.height
     clip: true
-    
+
     property int leftMargin: 16
     property int fontBig: 28
     property int fontMedium: 18
     property int fontSmall: 11
-    
+
     property string textColour: virtualstudio.darkMode ? "#FAFBFB" : "#0F0D0D"
     property string buttonColour: virtualstudio.darkMode ? "#FAFBFB" : "#F0F1F1"
     property string buttonHoverColour: virtualstudio.darkMode ? "#E9E9E9" : "#E4E5E5"
@@ -20,25 +19,15 @@ Item {
     property string buttonTextHover: virtualstudio.darkMode ? "#242222" : "#D00A0A"
     property string buttonTextPressed: virtualstudio.darkMode ? "#323030" : "#D00A0A"
 
-    property real imageLightnessValue: virtualstudio.darkMode ? 1.0 : 0.0
-
-    Image {
+    AppIcon {
         id: ohnoImage
-        source: "ohno.png"
-        width: 180
-        height: 180
         y: 60
         anchors.horizontalCenter: parent.horizontalCenter
+        width: 180
+        height: 180
+        icon.source: "sentiment_very_dissatisfied.svg"
     }
 
-    Colorize {
-        anchors.fill: ohnoImage
-        source: ohnoImage
-        hue: 0
-        saturation: 0
-        lightness: imageLightnessValue
-    }
-    
     Text {
         id: ohnoHeader
         text: "Oh no!"
@@ -71,7 +60,7 @@ Item {
             border.color: buttonStroke
             layer.enabled: !backButton.down
         }
-        onClicked: { window.state = "browse" }
+        onClicked: { virtualstudio.windowState = "browse" }
         width: 256 * virtualstudio.uiScale
         height: 42 * virtualstudio.uiScale
         anchors.horizontalCenter: parent.horizontalCenter

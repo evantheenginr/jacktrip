@@ -54,51 +54,68 @@ class VsServerInfo : public QObject
     Q_PROPERTY(QString flag READ flag CONSTANT)
     Q_PROPERTY(QString bannerURL READ bannerURL CONSTANT)
     Q_PROPERTY(QString location READ location CONSTANT)
-    Q_PROPERTY(bool isManageable READ isManageable CONSTANT)
+    Q_PROPERTY(bool isAdmin READ isAdmin CONSTANT)
+    Q_PROPERTY(bool isManaged READ isManaged CONSTANT)
     Q_PROPERTY(quint16 period READ period CONSTANT)
     Q_PROPERTY(quint32 sampleRate READ sampleRate CONSTANT)
     Q_PROPERTY(quint16 queueBuffer READ queueBuffer CONSTANT)
     Q_PROPERTY(QString status READ status CONSTANT)
+    Q_PROPERTY(bool enabled READ enabled CONSTANT)
+    Q_PROPERTY(QString cloudId READ cloudId CONSTANT)
+    Q_PROPERTY(QString id READ id CONSTANT)
+    Q_PROPERTY(QString inviteKey READ inviteKey CONSTANT)
 
    public:
     enum serverSectionT { YOUR_STUDIOS, SUBSCRIBED_STUDIOS, PUBLIC_STUDIOS };
 
     explicit VsServerInfo(QObject* parent = nullptr);
+    VsServerInfo& operator=(const VsServerInfo& info);
     ~VsServerInfo() override;
 
     serverSectionT section();
-    QString type();
+    QString type() const;
     void setSection(serverSectionT section);
-    QString name();
+    QString name() const;
     void setName(const QString& name);
-    QString host();
-    bool canConnect();
-    bool canStart();
+    QString host() const;
+    bool canConnect() const;
+    bool canStart() const;
     void setHost(const QString& host);
-    quint16 port();
+    quint16 port() const;
     void setPort(quint16 port);
-    bool isPublic();
+    bool enabled() const;
+    void setEnabled(bool enabled);
+    bool isOwner() const;
+    void setIsOwner(bool owner);
+    bool isAdmin() const;
+    void setIsAdmin(bool admin);
+    bool isPublic() const;
     void setIsPublic(bool isPublic);
-    QString region();
-    QString flag();
-    QString location();
+    QString region() const;
+    QString flag() const;
+    QString location() const;
     void setRegion(const QString& region);
-    bool isManageable();
-    void setIsManageable(bool isManageable);
-    quint16 period();
+    bool isManaged() const;
+    void setIsManaged(bool isManageable);
+    quint16 period() const;
     void setPeriod(quint16 period);
-    quint32 sampleRate();
+    quint32 sampleRate() const;
     void setSampleRate(quint32 sampleRate);
-    quint16 queueBuffer();
+    quint16 queueBuffer() const;
     void setQueueBuffer(quint16 queueBuffer);
-    QString bannerURL();
+    QString bannerURL() const;
     void setBannerURL(const QString& bannerURL);
-    QString id();
+    QString id() const;
     void setId(const QString& id);
-    QString sessionId();
+    QString sessionId() const;
     void setSessionId(const QString& sessionId);
-    QString status();
+    QString status() const;
     void setStatus(const QString& status);
+    QString inviteKey() const;
+    void setInviteKey(const QString& inviteKey);
+    QString cloudId() const;
+    void setCloudId(const QString& cloudId);
+    bool operator<(const VsServerInfo& other) const;
 
    signals:
     void canConnectChanged();
@@ -108,9 +125,12 @@ class VsServerInfo : public QObject
     QString m_name;
     QString m_host;
     quint16 m_port;
+    bool m_enabled;
+    bool m_owner;
+    bool m_admin;
+    bool m_isManaged;
     bool m_isPublic;
     QString m_region;
-    bool m_isManageable;
     quint16 m_period;
     quint32 m_sampleRate;
     quint16 m_queueBuffer;
@@ -118,21 +138,17 @@ class VsServerInfo : public QObject
     QString m_id;
     QString m_sessionId;
     QString m_status;
+    QString m_cloudId;
+    QString m_inviteKey;
 
     /* Remaining JSON fields
     "loopback": true,
     "stereo": true,
     "type": "JackTrip",
-    "managed": true,
     "size": "c5.large",
     "mixBranch": "main",
     "mixCode": "SimpleMix(~maxClients).masterVolume_(1).connect.start;",
-    "enabled": true,
-    "admin": true,
-    "cloudId": "string",
-    "owner": true,
     "ownerId": "string",
-    "status": "Ready",
     "subStatus": "Active",
     "createdAt": "2021-09-07T17:15:38Z",
     "expiresAt": "2021-09-07T17:15:38Z",

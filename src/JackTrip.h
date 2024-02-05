@@ -38,7 +38,7 @@
 #ifndef __JACKTRIP_H__
 #define __JACKTRIP_H__
 
-//#include <tr1/memory> //for shared_ptr
+// #include <tr1/memory> //for shared_ptr
 #include <QObject>
 #include <QSharedPointer>
 #include <QSslSocket>
@@ -58,7 +58,7 @@
 #include "PacketHeader.h"
 #include "RingBuffer.h"
 
-//#include <signal.h>
+// #include <signal.h>
 /** \brief Main class to creates a SERVER (to listen) or a CLIENT (to connect
  * to a listening server) to send audio streams in the network.
  *
@@ -134,7 +134,9 @@ class JackTrip : public QObject
      */
     JackTrip(
         jacktripModeT JacktripMode = CLIENT, dataProtocolT DataProtocolType = UDP,
-        int NumChansIn = gDefaultNumInChannels, int NumChansOut = gDefaultNumInChannels,
+        int BaseChanIn = 0, int NumChansIn = gDefaultNumInChannels, int BaseChanOut = 0,
+        int NumChansOut                            = gDefaultNumInChannels,
+        AudioInterface::inputMixModeT InputMixMode = AudioInterface::MIX_UNSET,
 #ifdef WAIR  // wair
         int NumNetRevChans = 0,
 #endif  // endwhere
@@ -156,7 +158,7 @@ class JackTrip : public QObject
         sSigInt = true;
     }
     static bool sSigInt;
-    static bool sJackStopped;
+    static bool sAudioStopped;
 
     /// \brief Starting point for the thread
     /*virtual void run() {
@@ -173,6 +175,7 @@ class JackTrip : public QObject
     // void appendProcessPlugin(const std::tr1::shared_ptr<ProcessPlugin> plugin);
     virtual void appendProcessPluginToNetwork(ProcessPlugin* plugin);
     virtual void appendProcessPluginFromNetwork(ProcessPlugin* plugin);
+    virtual void appendProcessPluginToMonitor(ProcessPlugin* plugin);
 
     /// \brief Start the processing threads
     virtual void startProcess(
@@ -191,7 +194,7 @@ class JackTrip : public QObject
 
     /// \brief Check if UDP port is already binded
     /// \param port Port number
-    virtual void checkIfPortIsBinded(int port);
+    virtual bool checkIfPortIsBinded(int port);
 
     //------------------------------------------------------------------------------------
     /// \name Getters and Setters Methods to change parameters after construction
@@ -224,6 +227,7 @@ class JackTrip : public QObject
     {
         mBufferStrategy = BufferStrategy;
     }
+    void setRegulatorThread(QThread* ptr) { mRegulatorThreadPtr = ptr; }
     /// \brief Sets (override) Audio Bit Resolution after construction
     virtual void setAudioBitResolution(
         AudioInterface::audioBitResolutionT AudioBitResolution)
@@ -381,7 +385,7 @@ class JackTrip : public QObject
     int getReceivePacketSizeInBytes() const;
     virtual void sendNetworkPacket(const int8_t* ptrToSlot)
     {
-        mSendRingBuffer->insertSlotNonBlocking(ptrToSlot, 0, 0);
+        mSendRingBuffer->insertSlotNonBlocking(ptrToSlot, 0, 0, 0);
     }
     virtual void receiveBroadcastPacket(int8_t* ptrToReadSlot)
     {
@@ -395,15 +399,9 @@ class JackTrip : public QObject
     {
         mSendRingBuffer->readSlotBlocking(ptrToReadSlot);
     }
-    virtual bool writeAudioBuffer(const int8_t* ptrToSlot, int len, int lostLen)
+    virtual bool writeAudioBuffer(const int8_t* ptrToSlot, int len, int lostLen, int seq)
     {
-        return mReceiveRingBuffer->insertSlotNonBlocking(ptrToSlot, len, lostLen);
-    }
-    virtual bool writeAudioBufferRegulator(const int8_t* ptrToSlot, int len, int seq,
-                                           int lostLen)
-    {
-        return mReceiveRingBuffer->insertSlotNonBlockingRegulator(ptrToSlot, len, seq,
-                                                                  lostLen);
+        return mReceiveRingBuffer->insertSlotNonBlocking(ptrToSlot, len, lostLen, seq);
     }
     uint32_t getBufferSizeInSamples() const
     {
@@ -436,17 +434,19 @@ class JackTrip : public QObject
     {
         return mNumAudioChansOut; /*return mAudioInterface->getNumOutputChannels();*/
     }
-#ifndef NO_JACK
     QString getAssignedClientName()
     {
+#ifndef NO_JACK
         if (mAudioInterface && mAudiointerfaceMode == JackTrip::JACK) {
             return static_cast<JackAudioInterface*>(mAudioInterface)
                 ->getAssignedClientName();
         } else {
             return QLatin1String("");
         }
-    }
+#else
+        return QLatin1String("");
 #endif
+    }
     virtual bool checkPeerSettings(int8_t* full_packet);
     void increaseSequenceNumber() { mPacketHeader->increaseSequenceNumber(); }
     int getSequenceNumber() const { return mPacketHeader->getSequenceNumber(); }
@@ -502,7 +502,7 @@ class JackTrip : public QObject
             return mAudioInterface->getSizeInBytesPerChannel() * mNumNetRevChans;
         else  // not wair
 #endif        // endwhere
-            return mAudioInterface->getSizeInBytesPerChannel() * mNumAudioChansIn;
+            return int(mAudioInterface->getSizeInBytesPerChannel()) * mNumAudioChansIn;
     }
 
     int getTotalAudioOutputPacketSizeInBytes() const
@@ -512,7 +512,36 @@ class JackTrip : public QObject
             return mAudioInterface->getSizeInBytesPerChannel() * mNumNetRevChans;
         else  // not wair
 #endif        // endwhere
-            return mAudioInterface->getSizeInBytesPerChannel() * mNumAudioChansOut;
+            return int(mAudioInterface->getSizeInBytesPerChannel()) * mNumAudioChansOut;
+    }
+    QString getDevicesWarningMsg() const
+    {
+        if (mAudioInterface == nullptr)
+            return QLatin1String("");
+        return QString::fromStdString(mAudioInterface->getDevicesWarningMsg());
+    }
+    QString getDevicesErrorMsg() const
+    {
+        if (mAudioInterface == nullptr)
+            return QLatin1String("");
+        return QString::fromStdString(mAudioInterface->getDevicesErrorMsg());
+    }
+    QString getDevicesWarningHelpUrl() const
+    {
+        if (mAudioInterface == nullptr)
+            return QLatin1String("");
+        return QString::fromStdString(mAudioInterface->getDevicesWarningHelpUrl());
+    }
+    QString getDevicesErrorHelpUrl() const
+    {
+        if (mAudioInterface == nullptr)
+            return QLatin1String("");
+        return QString::fromStdString(mAudioInterface->getDevicesErrorHelpUrl());
+    }
+    bool getHighLatencyFlag() const
+    {
+        return (mAudioInterface == nullptr) ? false
+                                            : mAudioInterface->getHighLatencyFlag();
     }
     //@}
     //------------------------------------------------------------------------------------
@@ -569,6 +598,7 @@ class JackTrip : public QObject
    private slots:
     void receivedConnectionTCP();
     void receivedDataTCP();
+    void receivedErrorTCP(QAbstractSocket::SocketError socketError);
     void connectionSecured();
     void receivedDataUDP();
     void udpTimerTick();
@@ -624,13 +654,18 @@ class JackTrip : public QObject
     DataProtocol::packetHeaderTypeT mPacketHeaderType;  ///< Packet Header Type
     JackTrip::audiointerfaceModeT mAudiointerfaceMode;
 
-    int mNumAudioChansIn;    ///< Number of Audio Input Channels
-    int mNumAudioChansOut;   ///< Number of Audio Output Channels
+    int mBaseAudioChanIn;                         ///< Base Audio Input Channel
+    int mNumAudioChansIn;                         ///< Number of Audio Input Channels
+    int mBaseAudioChanOut;                        ///< Base Audio Output Channel
+    int mNumAudioChansOut;                        ///< Number of Audio Output Channels
+    AudioInterface::inputMixModeT mInputMixMode;  ///< Input mix mode
+
 #ifdef WAIR                  // WAIR
     int mNumNetRevChans;     ///< Number of Network Audio Channels (net comb filters)
 #endif                       // endwhere
     int mBufferQueueLength;  ///< Audio Buffer from network queue length
     int mBufferStrategy;
+    QThread* mRegulatorThreadPtr;
     int mBroadcastQueueLength;
     uint32_t mSampleRate;                             ///< Sample Rate
     uint32_t mDeviceID;                               ///< RTAudio DeviceID
@@ -676,8 +711,11 @@ class JackTrip : public QObject
         mProcessPluginsFromNetwork;  ///< Vector of ProcessPlugin<EM>s</EM>
     QVector<ProcessPlugin*>
         mProcessPluginsToNetwork;  ///< Vector of ProcessPlugin<EM>s</EM>
-
+    QVector<ProcessPlugin*>
+        mProcessPluginsToMonitor;  ///< Vector of ProcessPlugin<EM>s</EM>
     QTimer mTimeoutTimer;
+    QTimer mRetryTimer;
+    int mRetries;
     int mSleepTime;
     int mElapsedTime;
     int mEndTime;

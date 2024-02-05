@@ -8,13 +8,13 @@ find its documentation at [mesonbuild.com](https://mesonbuild.com/).
 === "Fedora"
 
     ```bash
-    dnf install meson qt5-qtbase-devel rtaudio-devel "pkgconfig(jack)" help2man
+    dnf install meson qt5-qtbase-devel qt5-qtquickcontrols2-devel qt5-qtsvg-devel qt5-qtnetworkauth-devel qt5-qtwebsockets-devel rtaudio-devel "pkgconfig(jack)" help2man python3-jinja2 python3-pyyaml
     ```
 
 === "Debian/Ubuntu"
 
     ```bash
-    apt install meson build-essential qtbase5-dev librtaudio-dev libjack-jackd2-dev help2man
+    apt install meson build-essential qtbase5-dev qtbase5-dev-tools qtchooser qt5-qmake qttools5-dev libqt5svg5-dev libqt5networkauth5-dev libqt5websockets5-dev qtdeclarative5-dev qtquickcontrols2-5-dev libjack-jackd2-dev git help2man
     ```
 
 === "MacOS"

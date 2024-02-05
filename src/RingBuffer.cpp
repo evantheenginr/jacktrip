@@ -129,7 +129,7 @@ void RingBuffer::readSlotBlocking(int8_t* ptrToReadSlot)
     while (mFullSlots == 0) {
         // std::cerr << "READ UNDER-RUN BLOCKING before" << endl;
         mBufferIsNotEmpty.wait(&mMutex, 200);
-        if (JackTrip::sJackStopped) {
+        if (JackTrip::sAudioStopped) {
             return;
         }
     }
@@ -147,7 +147,8 @@ void RingBuffer::readSlotBlocking(int8_t* ptrToReadSlot)
 }
 
 //*******************************************************************************
-bool RingBuffer::insertSlotNonBlocking(const int8_t* ptrToSlot, int len, int lostLen)
+bool RingBuffer::insertSlotNonBlocking(const int8_t* ptrToSlot, int len, int lostLen,
+                                       [[maybe_unused]] int seq_num)
 {
     if (len != mSlotSize && 0 != len) {
         // RingBuffer does not support mixed buf sizes
@@ -184,21 +185,12 @@ bool RingBuffer::insertSlotNonBlocking(const int8_t* ptrToSlot, int len, int los
 }
 
 //*******************************************************************************
-bool RingBuffer::insertSlotNonBlockingRegulator([[maybe_unused]] const int8_t* ptrToSlot,
-                                                [[maybe_unused]] int len,
-                                                [[maybe_unused]] int seq_num,
-                                                [[maybe_unused]] int lostLen)
-{
-    return true;
-}
-
-//*******************************************************************************
 void RingBuffer::readSlotNonBlocking(int8_t* ptrToReadSlot)
 {
     QMutexLocker locker(&mMutex);  // lock the mutex
     ++mReadsNew;
     if (mFullSlots < mLevelCur) {
-        mLevelCur = std::max((double)mFullSlots, mLevelCur - mLevelDownRate);
+        mLevelCur = std::max<double>((double)mFullSlots, mLevelCur - mLevelDownRate);
     } else {
         mLevelCur = mFullSlots;
     }

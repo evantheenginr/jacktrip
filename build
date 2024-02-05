@@ -4,14 +4,15 @@
 # Parse command line options
 clean=1
 install=0
-CONFIG=
-UNKNOWN_OPTIONS=
+jobs=1
+CONFIG="DEFINES+=JACKTRIP_BUILD_INFO=\\\"$(git describe --tags)-$(git rev-parse --short HEAD)\\\""
+UNKNOWN_OPTIONS=()
 BUILD_RTAUDIO=0
 RTAUDIO=0
 NO_SYSTEM_RTAUDIO=0
 PRO_FILE="../jacktrip.pro"
 HELP_STR="usage:\n
-./build [noclean nojack rtaudio nogui novs static install [-config static]]\n\n
+./build [noclean nojack rtaudio nogui novs vsftux static install [-config static]]\n\n
 options:\n
 noclean - do not run \"make clean\" first\n
 nojack - build without jack\n
@@ -19,13 +20,14 @@ rtaudio - build with RtAudio\n
 no-system-rtaudio - use bundled RtAudio library even if it's available in the system\n
 nogui - build without the gui\n
 novs - build without Virtual Studio support\n
+vsftux - build with Virtual Studio first launch experience\n
 noupdater - build without auto-update support\n
 static - build with static libraries\n
 weakjack - build with weak linking of jack libraries\n
 install - install jacktrip in system location (uses sudo)\n
 "
 while [[ "$#" -gt 0 ]]; do
-  if [[ -z "$UNKNOWN_OPTIONS" ]]; then
+  if [[ ${#UNKNOWN_OPTIONS[@]} -eq 0 ]]; then
     case $1 in
       noclean) clean=0 ;;
       nojack)
@@ -46,6 +48,10 @@ while [[ "$#" -gt 0 ]]; do
       echo "Building without Virtual Studio support"
       CONFIG="-config novs $CONFIG" 
       ;;
+      vsftux)
+      echo "Building with Virtual Studio first launch experience"
+      CONFIG="-config vsftux $CONFIG" 
+      ;;
       noupdater)
       echo "Building without auto-update support"
       CONFIG="-config noupdater $CONFIG"
@@ -62,15 +68,22 @@ while [[ "$#" -gt 0 ]]; do
       echo "Will install JackTrip in system location"
       install=1
       ;;
+      -j*)
+      jobs=$(echo $1 |sed 's,-j0*\([0-9]*\),\1,')
+      if [[ $jobs -le 1 ]]; then
+        jobs=1
+      fi
+      echo "Will build using $jobs make jobs"
+      ;;
       -h|--help) 
       echo -e $HELP_STR; exit 
       ;;
-      *) UNKNOWN_OPTIONS="$UNKNOWN_OPTIONS $1" ;;
+      *) UNKNOWN_OPTIONS+=("$1") ;;
     esac
     shift
   else
     case $1 in
-      *) UNKNOWN_OPTIONS="$UNKNOWN_OPTIONS $1" ;;
+      *) UNKNOWN_OPTIONS+=("$1") ;;
     esac
     shift
   fi
@@ -99,18 +112,12 @@ if [[ $platform == 'linux' ]]; then
     echo "Using qmake-qt5"
     QCMD=qmake-qt5
   elif hash qmake 2>/dev/null; then #in case qt was compiled by user
-  echo "Using qmake"
-  QCMD=qmake
-fi
-QSPEC=linux-g++
-MCMD=make
+    echo "Using qmake"
+    QCMD=qmake
+  fi
+  MCMD=make
 elif [[ $platform == 'macosx' ]]; then
   QCMD=qmake
-  QSPEC=macx-clang
-  arch=`arch`
-  if [[ "$arch" == 'arm64' ]]; then
-    QSPEC=macx-clang-arm64
-  fi  
   # if qmake is not in path, try homebrew qt5
   echo "path to qmake"
   echo "$(which qmake)"
@@ -128,11 +135,23 @@ elif [[ $platform == 'macosx' ]]; then
   MCMD=make
 elif [[ $platform == 'mingw' ]]; then
   QCMD=qmake
-  QSPEC=win32-g++
   MCMD=mingw32-make
 elif [[ $platform == 'unknown' ]]; then
   echo "Unregonized platform, exiting"
   exit
+fi
+
+# detect spec
+QSPEC=`$QCMD -query | grep QMAKE_SPEC`
+QSPEC=${QSPEC##QMAKE_SPEC:}
+
+# check spec for windows to update make command
+if [[ $QSPEC == "win32-msvc" ]]; then
+  MCMD=nmake
+  JOM=$(which jom.exe)
+  if [[ "x$JOM" != "x" ]]; then
+    MCMD=$JOM
+  fi
 fi
 
 # check for RtAudio
@@ -168,13 +187,16 @@ set -e
 
 # Build
 echo "qmake command:"
-echo "$QCMD -spec $QSPEC $CONFIG $PRO_FILE" $UNKNOWN_OPTIONS
+echo $QCMD -spec $QSPEC $CONFIG "${UNKNOWN_OPTIONS[@]}" $PRO_FILE
+$QCMD -spec $QSPEC $CONFIG "${UNKNOWN_OPTIONS[@]}" $PRO_FILE
 if [[ $clean == 1 ]]; then
-  $QCMD -spec $QSPEC $CONFIG $PRO_FILE $UNKNOWN_OPTIONS
   $MCMD clean
 fi
-$QCMD -spec $QSPEC $CONFIG $PRO_FILE $UNKNOWN_OPTIONS
-$MCMD release
+if [[ "$MCMD" == "nmake" ]]; then
+  $MCMD release
+else
+  $MCMD -j$jobs release
+fi
 if [[ "$install" == 1 ]]; then
   echo "*** Installing JackTrip ***"
   echo "We need elevated privileges to install JackTrip in the system location"

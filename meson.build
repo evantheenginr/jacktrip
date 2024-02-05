@@ -2,14 +2,27 @@ project('jacktrip', ['cpp','c'],
 		default_options: ['cpp_std=c++17','warning_level=2','optimization=2'])
 
 if get_option('profile') == 'development'
-  application_id = 'org.jacktrip.JackTrip.Devel'
-  name_suffix = ' (Development Snapshot)'
+	application_id = 'org.jacktrip.JackTrip.Devel'
+	name_suffix = ' (Development Snapshot)'
 else
-  application_id = 'org.jacktrip.JackTrip'
-  name_suffix = ''
+	application_id = 'org.jacktrip.JackTrip'
+	name_suffix = ''
 endif
 
-qt5 = import('qt5')
+qt_version = get_option('qtversion')
+if qt_version == ''
+	qt_dep = dependency('qt6', modules: ['Core'], required: false)
+	if qt_dep.found()
+		qt_version = '6'
+	else
+		qt_version = '5'
+	endif
+endif
+if qt_version == '5' and get_option('nogui') == false and get_option('novs') == false
+	error('JackTrip Virtual Studio requires Qt 6.2 or later.')
+endif
+qt = import('qt' + qt_version)
+
 cmake = import('cmake')
 
 compiler = meson.get_compiler('cpp')
@@ -18,8 +31,30 @@ defines = ['-DWAIRTOHUB']
 c_defines = []
 incdirs = []
 
+if get_option('buildtype') == 'release'
+	defines += ['-DNDEBUG']
+	c_defines += ['-DNDEBUG']
+endif
+
+build_info = get_option('buildinfo')
+git = find_program('git', required: false)
+if build_info == '' and git.found()
+	git_tags_cmd = run_command(git, 'describe', '--tags', check: false)
+	git_hash_cmd = run_command(git, 'rev-parse', '--short', 'HEAD', check: false)
+	if git_tags_cmd.returncode() == 0 and git_hash_cmd.returncode() == 0
+		git_tags = git_tags_cmd.stdout().strip()
+		git_hash = git_hash_cmd.stdout().strip()
+		build_info = git_tags + '-' + git_hash
+	endif
+endif
+if build_info != ''
+	message('Build info: ' + build_info)
+	defines += ['-DJACKTRIP_BUILD_INFO=' + build_info]
+endif
+
 src = [	'src/DataProtocol.cpp',
 	'src/JackTrip.cpp',
+	'src/ProcessPlugin.cpp',
 	'src/AudioTester.cpp',
 	'src/jacktrip_globals.cpp',
 	'src/JackTripWorker.cpp',
@@ -34,6 +69,11 @@ src = [	'src/DataProtocol.cpp',
 	'src/AudioInterface.cpp',
 	'src/Compressor.cpp',
 	'src/Limiter.cpp',
+	'src/Meter.cpp',
+	'src/Monitor.cpp',
+	'src/Volume.cpp',
+	'src/Tone.cpp',
+	'src/StereoToMono.cpp',
 	'src/Reverb.cpp',
 	'src/main.cpp',
 	'src/SslServer.cpp',
@@ -41,8 +81,15 @@ src = [	'src/DataProtocol.cpp',
 
 moc_h = ['src/DataProtocol.h',
 	'src/JackTrip.h',
+	'src/ProcessPlugin.h',
+	'src/Meter.h',
+	'src/Monitor.h',
+	'src/StereoToMono.h',
+	'src/Volume.h',
+	'src/Tone.h',
 	'src/JackTripWorker.h',
 	'src/PacketHeader.h',
+	'src/Regulator.h',
 	'src/Settings.h',
 	'src/UdpDataProtocol.h',
 	'src/UdpHubListener.h',
@@ -52,13 +99,18 @@ moc_h = ['src/DataProtocol.h',
 ui_h = []
 qres = []
 deps = [dependency('threads')]
+link_args = []
 
 subdir('win')
 subdir('linux')
 
 jack_dep = dependency('jack', required: get_option('jack'))
 if not jack_dep.found()
+	if get_option('weakjack') == true
+		error('unable to find jack and weakjack requested')
+	endif
 	defines += '-DNO_JACK'
+	c_defines += '-DNO_JACK'
 else
 	src += 	['src/JackAudioInterface.cpp',
 		'src/JMess.cpp',
@@ -69,7 +121,7 @@ else
 		src += 'externals/weakjack/weak_libjack.c'
 		defines += '-DUSE_WEAK_JACK'
 		c_defines += '-DUSE_WEAK_JACK'
-		deps += jack_dep.partial_dependency(includes: true)
+		deps += jack_dep.partial_dependency(compile_args: true, includes: true)
 		deps += compiler.find_library('dl', required : false)
 	else
 		deps += jack_dep
@@ -78,19 +130,25 @@ endif
 
 if get_option('nogui') == true
 	defines += '-DNO_GUI'
-	qt5_dep = dependency('qt5', modules: ['Core', 'Network'], include_type: 'system')
+	if qt_version == '5'
+		deps += dependency('qt5', modules: ['Core', 'Network'], include_type: 'system')
+	else
+		deps += dependency('qt6', modules: ['Core', 'Network'], include_type: 'system')
+	endif
 else
 	src += [
 		'src/gui/qjacktrip.cpp',
 		'src/gui/about.cpp',
 		'src/gui/messageDialog.cpp',
-		'src/gui/textbuf.cpp'
+		'src/gui/textbuf.cpp',
+		'src/gui/vuMeter.cpp'
 	]
 	moc_h += [
 		'src/gui/about.h',
 		'src/gui/qjacktrip.h',
 		'src/gui/messageDialog.h',
-		'src/gui/textbuf.h'
+		'src/gui/textbuf.h',
+		'src/gui/vuMeter.h'
 	]
 	ui_h += [
 		'src/gui/qjacktrip.ui',
@@ -100,31 +158,57 @@ else
 
 	if get_option('novs') == true
 		defines += '-DNO_VS'
-		qt5_dep = dependency('qt5', modules: ['Core', 'Gui', 'Network', 'Widgets'], include_type: 'system')
+		if qt_version == '5'
+			deps += dependency('qt5', modules: ['Core', 'Gui', 'Network', 'Widgets'], include_type: 'system')
+		else
+			deps += dependency('qt6', modules: ['Core', 'Gui', 'Network', 'Widgets'], include_type: 'system')
+		endif
 		qres = ['src/gui/qjacktrip_novs.qrc']
 	else
 		src += [
 			'src/gui/virtualstudio.cpp',
+			'src/gui/vsAuth.cpp',
+			'src/gui/vsApi.cpp',
+			'src/gui/vsDeviceCodeFlow.cpp',
+			'src/gui/vsDeeplink.cpp',
 			'src/gui/vsDevice.cpp',
+			'src/gui/vsAudio.cpp',
 			'src/gui/vsServerInfo.cpp',
 			'src/gui/vsQuickView.cpp',
 			'src/gui/vsWebSocket.cpp',
-			'src/gui/vsUrlHandler.cpp',
+			'src/gui/vsPermissions.cpp',
 			'src/gui/vsPinger.cpp',
-			'src/gui/vsPing.cpp'
+			'src/gui/vsPing.cpp',
+			'src/gui/WebSocketTransport.cpp'
 		]
 		moc_h += [
 			'src/gui/virtualstudio.h',
+			'src/gui/vsApi.h',
+			'src/gui/vsAuth.h',
+			'src/gui/vsDeviceCodeFlow.h',
+			'src/gui/vsDeeplink.h',
 			'src/gui/vsDevice.h',
+			'src/gui/vsAudio.h',
 			'src/gui/vsServerInfo.h',
 			'src/gui/vsQuickView.h',
 			'src/gui/vsWebSocket.h',
+			'src/gui/vsPermissions.h',
 			'src/gui/vsPinger.h',
 			'src/gui/vsPing.h',
-			'src/gui/vsUrlHandler.h',
-			'src/JTApplication.h'
+			'src/gui/vsQmlClipboard.h',
+			'src/JTApplication.h',
+			'src/gui/WebSocketTransport.h'
 		]
-		qt5_dep = dependency('qt5', modules: ['Core', 'Gui', 'Network', 'Widgets', 'Quick', 'Qml', 'Svg', 'NetworkAuth', 'WebSockets'], include_type: 'system')
+
+		if host_machine.system() == 'darwin'
+			moc_h += ['src/gui/vsMacPermissions.h']
+		endif
+
+		if get_option('vsftux') == true
+			defines += '-DVS_FTUX'
+		endif
+
+		deps += dependency('qt6', modules: ['Core', 'Gui', 'Network', 'Widgets', 'Core5Compat', 'Quick', 'QuickControls2', 'Qml', 'ShaderTools', 'Svg', 'WebSockets', 'WebEngineCore', 'WebEngineQuick', 'WebChannel'], include_type: 'system')
 		qres = ['src/gui/qjacktrip.qrc']
 	endif
 
@@ -145,10 +229,18 @@ else
 		]
 		ui_h += ['src/dblsqd/update_dialog.ui']
 	endif
-endif
-deps += qt5_dep
 
-prepro_files = qt5.preprocess(moc_headers : moc_h, ui_files : ui_h, qresources : qres)
+	if get_option('nofeedback') == true
+		defines += '-DNO_FEEDBACK'
+	else
+		src += [ 'src/Analyzer.cpp' ]
+		moc_h += [ 'src/Analyzer.h' ]
+	endif
+endif
+
+if qt_version == '6' and get_option('default_library') == 'static'
+	deps += dependency('qt6', modules: ['BundledLibpng', 'BundledPcre2', 'BundledHarfbuzz'], include_type: 'system')
+endif
 
 # TODO: QT_OPENSOURCE should only be defined for open source Qt distribution
 # in QMake this can be checked with QT_EDITION == 'OpenSource'
@@ -159,6 +251,13 @@ if rtaudio_dep.found() == true
 	defines += '-DRT_AUDIO'
 	src += 'src/RtAudioInterface.cpp'
 	deps += rtaudio_dep
+endif
+
+if rtaudio_dep.found() == false and jack_dep.found() == false
+	error('''
+	JackTrip requires at least one available audio backend. Install the
+	appropriate library or enable the appropriate backends using meson
+	configure.''')
 endif
 
 if host_machine.system() == 'darwin'
@@ -172,19 +271,45 @@ if host_machine.system() == 'darwin'
 	add_languages('objcpp')
 endif
 
-jacktrip = executable('jacktrip', src, prepro_files, include_directories: incdirs, dependencies: deps, c_args: c_defines, cpp_args: defines, install: true )
+if host_machine.system() == 'darwin' and get_option('novs') == false
+	src += ['src/gui/vsMacPermissions.mm']
+	apple_av_dep = dependency('appleframeworks', modules : ['avfoundation', 'webkit'])
+	deps += apple_av_dep
+endif
+
+qres_files = []
+if qres.length() > 0
+	qres_files = qt.compile_resources(sources: qres)
+endif
+moc_files = qt.compile_moc(headers: moc_h, extra_args: defines)
+ui_files = []
+if ui_h.length() > 0
+	ui_files = qt.compile_ui(sources: ui_h)
+endif
+
+jacktrip = executable('jacktrip', src, qres_files, ui_files, moc_files, include_directories: incdirs, dependencies: deps, link_args: link_args, c_args: c_defines, cpp_args: defines, install: true )
 
 help2man = find_program('help2man', required: false)
-if not (host_machine.system() == 'windows')
+if (host_machine.system() == 'linux')
 	if help2man.found()
+		gzip = find_program('gzip', required: false)
 		help2man_opts = [
+			'--name="high-quality system for audio network performances"',
 			'--no-info',
 			'--section=1']
-		custom_target('jacktrip.1',
+		manfile = custom_target('jacktrip.1',
 			output: 'jacktrip.1',
 			command: [help2man, help2man_opts, '--output=@OUTPUT@', jacktrip],
-			install: true,
+			install: not gzip.found(),
 			install_dir: get_option('mandir') / 'man1')
+		if gzip.found()
+			custom_target('jacktrip.1.gz',
+				input: manfile,
+				output: 'jacktrip.1.gz',
+				command: [gzip, '-k', '-f', '@INPUT@'],
+				install: true,
+				install_dir: get_option('mandir') / 'man1')
+		endif
 	endif
 endif
 
@@ -196,4 +321,3 @@ summary({'Application ID': application_id,
 	'GUI': not get_option('nogui'),
 	'WAIR': get_option('wair'),
 	'Manpage': help2man.found()}, bool_yn: true, section: 'Configuration')
-

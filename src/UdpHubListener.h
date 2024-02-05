@@ -111,8 +111,7 @@ class UdpHubListener : public QObject
     void stopCheck();
 
    signals:
-    void Listening();
-    void ClientAddressSet();
+    void signalStarted();
     void signalRemoveThread(int id);
     void signalStopped();
     void signalError(const QString& errorMessage);
@@ -178,6 +177,7 @@ class UdpHubListener : public QObject
     int mTotalRunningThreads;  ///< Number of Threads running in the pool
     QMutex mMutex;
     JackTrip::underrunModeT mUnderRunMode;
+    AudioInterface::audioBitResolutionT mAudioBitResolution;
     int mBufferQueueLength;
 
     QStringList mHubPatchDescriptions;
@@ -189,6 +189,9 @@ class UdpHubListener : public QObject
 
     int mIOStatTimeout;
     QSharedPointer<std::ostream> mIOStatStream;
+
+    /// thread used to pull packets from Regulator (if mBufferStrategy==3)
+    QThread* mRegulatorThreadPtr;
 
     int mBufferStrategy;
     int mBroadcastQueue;
@@ -243,6 +246,10 @@ class UdpHubListener : public QObject
     void setUnderRunMode(JackTrip::underrunModeT UnderRunMode)
     {
         mUnderRunMode = UnderRunMode;
+    }
+    void setAudioBitResolution(AudioInterface::audioBitResolutionT AudioBitResolution)
+    {
+        mAudioBitResolution = AudioBitResolution;
     }
     void setBufferQueueLength(int BufferQueueLength)
     {

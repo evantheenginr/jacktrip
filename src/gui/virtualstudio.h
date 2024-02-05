@@ -31,93 +31,117 @@
 
 /**
  * \file virtualstudio.h
- * \author Aaron Wyatt
+ * \author Matt Horton, based on code by Aaron Wyatt
  * \date March 2022
  */
 
 #ifndef VIRTUALSTUDIO_H
 #define VIRTUALSTUDIO_H
 
-#include <QList>
+#include <QJsonObject>
+#include <QMap>
 #include <QMutex>
+#include <QNetworkAccessManager>
 #include <QScopedPointer>
 #include <QSharedPointer>
+#include <QString>
+#include <QStringList>
 #include <QTimer>
-#include <QtNetworkAuth>
+#include <QUrl>
+#include <QVector>
+#include <QWebChannel>
+#include <QWebSocketServer>
 
-#include "../JackTrip.h"
-#include "vsDevice.h"
+#include "../Settings.h"
+#include "qjacktrip.h"
+#include "vsConstants.h"
 #include "vsQuickView.h"
 #include "vsServerInfo.h"
-#include "vsUrlHandler.h"
-#include "vsWebSocket.h"
 
 #ifdef __APPLE__
 #include "NoNap.h"
 #endif
 
-class QJackTrip;
+class JackTrip;
+class VsAudio;
+class VsApi;
+class VsAuth;
+class VsDevice;
+class VsWebSocket;
+
+typedef QSharedPointer<VsServerInfo> VsServerInfoPointer;
 
 class VirtualStudio : public QObject
 {
     Q_OBJECT
-    Q_PROPERTY(bool showFirstRun READ showFirstRun NOTIFY showFirstRunChanged)
+    Q_PROPERTY(int webChannelPort READ webChannelPort NOTIFY webChannelPortChanged)
+    Q_PROPERTY(bool showFirstRun READ showFirstRun WRITE setShowFirstRun NOTIFY
+                   showFirstRunChanged)
     Q_PROPERTY(bool hasRefreshToken READ hasRefreshToken NOTIFY hasRefreshTokenChanged)
     Q_PROPERTY(QString versionString READ versionString CONSTANT)
     Q_PROPERTY(QString logoSection READ logoSection NOTIFY logoSectionChanged)
-    Q_PROPERTY(bool selectableBackend READ selectableBackend CONSTANT)
-    Q_PROPERTY(QString audioBackend READ audioBackend WRITE setAudioBackend NOTIFY
-                   audioBackendChanged)
     Q_PROPERTY(
-        int inputDevice READ inputDevice WRITE setInputDevice NOTIFY inputDeviceChanged)
-    Q_PROPERTY(int outputDevice READ outputDevice WRITE setOutputDevice NOTIFY
-                   outputDeviceChanged)
+        QString connectedErrorMsg READ connectedErrorMsg NOTIFY connectedErrorMsgChanged)
+
     Q_PROPERTY(
-        int bufferSize READ bufferSize WRITE setBufferSize NOTIFY bufferSizeChanged)
-    Q_PROPERTY(int currentStudio READ currentStudio NOTIFY currentStudioChanged)
+        QVector<VsServerInfo*> serverModel READ getServerModel NOTIFY serverModelChanged)
+    Q_PROPERTY(VsServerInfo* currentStudio READ currentStudio NOTIFY currentStudioChanged)
+    Q_PROPERTY(QUrl studioToJoin READ studioToJoin WRITE setStudioToJoin NOTIFY
+                   studioToJoinChanged)
     Q_PROPERTY(QJsonObject regions READ regions NOTIFY regionsChanged)
     Q_PROPERTY(QJsonObject userMetadata READ userMetadata NOTIFY userMetadataChanged)
     Q_PROPERTY(bool showInactive READ showInactive WRITE setShowInactive NOTIFY
                    showInactiveChanged)
     Q_PROPERTY(bool showSelfHosted READ showSelfHosted WRITE setShowSelfHosted NOTIFY
                    showSelfHostedChanged)
+    Q_PROPERTY(bool showCreateStudio READ showCreateStudio WRITE setShowCreateStudio
+                   NOTIFY showCreateStudioChanged)
     Q_PROPERTY(QString connectionState READ connectionState NOTIFY connectionStateChanged)
     Q_PROPERTY(QJsonObject networkStats READ networkStats NOTIFY networkStatsChanged)
+    Q_PROPERTY(bool networkOutage READ networkOutage NOTIFY updatedNetworkOutage)
+
     Q_PROPERTY(QString updateChannel READ updateChannel WRITE setUpdateChannel NOTIFY
                    updateChannelChanged)
     Q_PROPERTY(float fontScale READ fontScale CONSTANT)
     Q_PROPERTY(float uiScale READ uiScale WRITE setUiScale NOTIFY uiScaleChanged)
     Q_PROPERTY(bool darkMode READ darkMode WRITE setDarkMode NOTIFY darkModeChanged)
+    Q_PROPERTY(bool collapseDeviceControls READ collapseDeviceControls WRITE
+                   setCollapseDeviceControls NOTIFY collapseDeviceControlsChanged)
+    Q_PROPERTY(bool testMode READ testMode WRITE setTestMode NOTIFY testModeChanged)
     Q_PROPERTY(bool showDeviceSetup READ showDeviceSetup WRITE setShowDeviceSetup NOTIFY
                    showDeviceSetupChanged)
     Q_PROPERTY(bool showWarnings READ showWarnings WRITE setShowWarnings NOTIFY
                    showWarningsChanged)
+    Q_PROPERTY(bool isExiting READ isExiting NOTIFY isExitingChanged)
     Q_PROPERTY(bool noUpdater READ noUpdater CONSTANT)
     Q_PROPERTY(bool psiBuild READ psiBuild CONSTANT)
     Q_PROPERTY(QString failedMessage READ failedMessage NOTIFY failedMessageChanged)
+    Q_PROPERTY(QString windowState READ windowState WRITE setWindowState NOTIFY
+                   windowStateUpdated)
+    Q_PROPERTY(QString apiHost READ apiHost WRITE setApiHost NOTIFY apiHostChanged)
+    Q_PROPERTY(bool vsFtux READ vsFtux CONSTANT)
+    Q_PROPERTY(
+        QStringList updateChannelComboModel READ getUpdateChannelComboModel CONSTANT)
 
    public:
     explicit VirtualStudio(bool firstRun = false, QObject* parent = nullptr);
     ~VirtualStudio() override;
 
     void setStandardWindow(QSharedPointer<QJackTrip> window);
+    void setCLISettings(QSharedPointer<Settings> settings);
     void show();
     void raiseToTop();
 
+    int webChannelPort();
     bool showFirstRun();
+    void setShowFirstRun(bool show);
     bool hasRefreshToken();
     QString versionString();
     QString logoSection();
-    bool selectableBackend();
-    QString audioBackend();
-    void setAudioBackend(const QString& backend);
-    int inputDevice();
-    void setInputDevice(int device);
-    int outputDevice();
-    void setOutputDevice(int device);
-    int bufferSize();
-    void setBufferSize(int index);
-    int currentStudio();
+    QString connectedErrorMsg();
+    void setConnectedErrorMsg(const QString& msg);
+    const QVector<VsServerInfo*>& getServerModel() const { return m_serverModel; }
+    VsServerInfo* currentStudio() { return &m_currentStudio; }
     QJsonObject regions();
     QJsonObject userMetadata();
     QString connectionState();
@@ -128,11 +152,17 @@ class VirtualStudio : public QObject
     void setShowInactive(bool inactive);
     bool showSelfHosted();
     void setShowSelfHosted(bool selfHosted);
+    bool showCreateStudio();
+    void setShowCreateStudio(bool createStudio);
     float fontScale();
     float uiScale();
     void setUiScale(float scale);
     bool darkMode();
     void setDarkMode(bool dark);
+    bool collapseDeviceControls();
+    void setCollapseDeviceControls(bool collapseDeviceControls);
+    bool testMode();
+    void setTestMode(bool test);
     QUrl studioToJoin();
     void setStudioToJoin(const QUrl& url);
     bool showDeviceSetup();
@@ -142,149 +172,176 @@ class VirtualStudio : public QObject
     bool noUpdater();
     bool psiBuild();
     QString failedMessage();
+    bool networkOutage();
+    bool backendAvailable();
+    QString windowState();
+    QString apiHost();
+    void setApiHost(QString host);
+    bool vsFtux();
+    bool isExiting();
+    const QStringList& getUpdateChannelComboModel() const
+    {
+        return m_updateChannelOptions;
+    }
 
    public slots:
     void toStandard();
     void toVirtualStudio();
     void login();
     void logout();
-    void refreshStudios(int index);
-    void refreshDevices();
-    void revertSettings();
-    void applySettings();
-    void connectToStudio(int studioIndex);
-    void completeConnection();
-    void disconnect();
-    void manageStudio(int studioIndex);
+    void refreshStudios(int index, bool signalRefresh = false);
+    void loadSettings();
+    void saveSettings();
+    void triggerReconnect(bool refresh);
+    void manageStudio(const QString& studioId, bool start = false);
+    void launchVideo(const QString& studioId);
     void createStudio();
     void editProfile();
     void showAbout();
-    void exit();
+    void openLink(const QString& url);
+    void handleDeeplinkRequest(const QUrl& url);
+    void udpWaitingTooLong();
+    void setWindowState(QString state);
+    void joinStudio();
+    void disconnect();
+    void collectFeedbackSurvey(QString serverId, int rating, QString message);
 
    signals:
-    void authSucceeded();
-    void authFailed();
     void failed();
     void connected();
     void disconnected();
     void refreshFinished(int index);
+    void webChannelPortChanged(int webChannelPort);
     void showFirstRunChanged();
     void hasRefreshTokenChanged();
     void logoSectionChanged();
-    void audioBackendChanged();
-    void inputDeviceChanged();
-    void outputDeviceChanged();
-    void bufferSizeChanged();
+    void connectedErrorMsgChanged();
+    void serverModelChanged();
     void currentStudioChanged();
     void regionsChanged();
     void userMetadataChanged();
     void showInactiveChanged();
     void showSelfHostedChanged();
+    void showCreateStudioChanged();
     void connectionStateChanged();
     void networkStatsChanged();
     void updateChannelChanged();
     void showDeviceSetupChanged();
     void showWarningsChanged();
     void uiScaleChanged();
+    void collapseDeviceControlsChanged(bool collapseDeviceControls);
     void newScale();
     void darkModeChanged();
-    void studioToJoinChanged();
+    void testModeChanged();
     void signalExit();
     void periodicRefresh();
     void failedMessageChanged();
+    void studioToJoinChanged();
+    void updatedNetworkOutage(bool outage);
+    void windowStateUpdated();
+    void isExitingChanged();
+    void apiHostChanged();
+    void feedbackDetected();
+    void openFeedbackSurveyModal(QString serverId);
 
    private slots:
-    void slotAuthSucceded();
-    void slotAuthFailed();
-    void processFinished();
-    void processError(const QString& errorMessage);
+    void slotAuthSucceeded();
     void receivedConnectionFromPeer();
-    void checkForHostname();
-    void endRetryPeriod();
+    void handleWebsocketMessage(const QString& msg);
+    void restartStudioSocket();
     void launchBrowser(const QUrl& url);
-    void joinStudio();
     void updatedStats(const QJsonObject& stats);
+    void processError(const QString& errorMessage);
+    void detectedFeedbackLoop();
+    void sendHeartbeat();
+    void connectionFinished();
+    void exit();
 
    private:
-    void setupAuthenticator();
-
-    void sendHeartbeat();
-    void getServerList(bool firstLoad = false, int index = -1);
-    void getUserId();
+    void resetState();
+    void getServerList(bool signalRefresh = false, int index = -1);
+    bool filterStudio(const VsServerInfo& serverInfo) const;
     void getSubscriptions();
     void getRegions();
     void getUserMetadata();
-#ifdef RT_AUDIO
-    void getDeviceList(QStringList* list, bool isInput);
-#endif
     void stopStudio();
+    bool readyToJoin();
+    void connectToStudio(VsServerInfo& studio);
+    void completeConnection();
 
-    bool m_showFirstRun = false;
-    bool m_checkSsl     = true;
+   private:
+    enum ReconnectState {
+        NOT_RECONNECTING = 0,
+        RECONNECTING_VALIDATE,
+        RECONNECTING_REFRESH
+    };
+
+    VsQuickView m_view;
+    VsServerInfo m_currentStudio;
+    QNetworkAccessManager* m_networkAccessManagerPtr;
+    QSharedPointer<QJackTrip> m_standardWindow;
+    QSharedPointer<Settings> m_cliSettings;
+    QSharedPointer<VsAuth> m_auth;
+    QSharedPointer<VsApi> m_api;
+    QScopedPointer<VsDevice> m_devicePtr;
+    QScopedPointer<VsWebSocket> m_studioSocketPtr;
+    QSharedPointer<VsAudio> m_audioConfigPtr;
+    QVector<VsServerInfoPointer> m_servers;
+    QVector<VsServerInfo*> m_serverModel;  //< qml doesn't like smart pointers
+    QScopedPointer<QWebSocketServer> m_webChannelServer;
+    QScopedPointer<QWebChannel> m_webChannel;
+    QMap<QString, bool> m_subscribedServers;
+    QJsonObject m_regions;
+    QJsonObject m_userMetadata;
+    QJsonObject m_networkStats;
+    QTimer m_startTimer;
+    QTimer m_refreshTimer;
+    QTimer m_heartbeatTimer;
+    QTimer m_networkOutageTimer;
+    QMutex m_refreshMutex;
+    QUrl m_studioToJoin;
     QString m_updateChannel;
     QString m_refreshToken;
     QString m_userId;
-    VsQuickView m_view;
-    QSharedPointer<QJackTrip> m_standardWindow;
-    QScopedPointer<QOAuth2AuthorizationCodeFlow> m_authenticator;
+    QString m_apiHost               = PROD_API_HOST;
+    ReconnectState m_reconnectState = ReconnectState::NOT_RECONNECTING;
+    QJackTrip::uiModeT m_uiMode     = QJackTrip::UNSET;
 
-    QList<QObject*> m_servers;
-    QStringList m_subscribedServers;
-    QJsonObject m_regions;
-    QJsonObject m_userMetadata;
-    QString m_logoSection     = QStringLiteral("Your Studios");
-    bool m_selectableBackend  = true;
-    bool m_useRtAudio         = false;
-    int m_currentStudio       = -1;
-    QString m_connectionState = QStringLiteral("Waiting");
-    QScopedPointer<JackTrip> m_jackTrip;
-    QTimer m_startTimer;
-    QTimer m_retryPeriodTimer;
-    bool m_startedStudio = false;
-    bool m_retryPeriod;
-    bool m_jackTripRunning = false;
+    bool m_firstRefresh           = true;
+    bool m_jackTripRunning        = false;
+    bool m_showFirstRun           = false;
+    bool m_checkSsl               = true;
+    bool m_refreshInProgress      = false;
+    bool m_onConnectedScreen      = false;
+    bool m_isExiting              = false;
+    bool m_showInactive           = true;
+    bool m_showSelfHosted         = false;
+    bool m_showCreateStudio       = false;
+    bool m_showDeviceSetup        = true;
+    bool m_showWarnings           = true;
+    bool m_darkMode               = false;
+    bool m_collapseDeviceControls = false;
+    bool m_testMode               = false;
+    bool m_authenticated          = false;
+    float m_fontScale             = 1;
+    float m_uiScale               = 1;
+    uint32_t m_webChannelPort     = 1;
 
-    QTimer m_refreshTimer;
-    QMutex m_refreshMutex;
-    bool m_allowRefresh      = true;
-    bool m_refreshInProgress = false;
-
-    QJsonObject m_networkStats;
-
-    QTimer m_heartbeatTimer;
-    VsWebSocket* m_heartbeatWebSocket = NULL;
-    VsDevice* m_device                = NULL;
-
-    bool m_onConnectedScreen = false;
-    bool m_isExiting         = false;
-    bool m_showInactive      = false;
-    bool m_showSelfHosted    = false;
-    bool m_showDeviceSetup   = true;
-    bool m_showWarnings      = true;
-    float m_fontScale        = 1;
-    float m_uiScale;
-    float m_previousUiScale;
-    bool m_darkMode         = false;
-    QString m_failedMessage = "";
-    QUrl m_studioToJoin;
-    bool m_authenticated = false;
-
-#ifdef RT_AUDIO
-    QStringList m_inputDeviceList;
-    QStringList m_outputDeviceList;
-    QString m_inputDevice;
-    QString m_outputDevice;
-    quint16 m_bufferSize;
-    QString m_previousInput;
-    QString m_previousOutput;
-    quint16 m_previousBuffer;
-    bool m_previousUseRtAudio = false;
-#endif
-    QStringList m_bufferOptions        = {"16", "32", "64", "128", "256", "512", "1024"};
+    QString m_failedMessage            = QStringLiteral("");
+    QString m_windowState              = QStringLiteral("start");
+    QString m_connectedErrorMsg        = QStringLiteral("");
+    QString m_logoSection              = QStringLiteral("Your Studios");
+    QString m_connectionState          = QStringLiteral("Waiting...");
     QStringList m_updateChannelOptions = {"Stable", "Edge"};
 
 #ifdef __APPLE__
     NoNap m_noNap;
+#endif
+
+#ifdef VS_FTUX
+    bool m_vsFtux = true;
+#else
+    bool m_vsFtux = false;
 #endif
 };
 
