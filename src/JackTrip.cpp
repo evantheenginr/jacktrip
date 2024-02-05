@@ -729,7 +729,7 @@ void JackTrip::onStatTimer()
     if (!mAudioTesterP.isNull() && mAudioTesterP->getEnabled()) {
         mIOStatLogStream << "\n";
     }
-    if (getBufferStrategy() != 3 && getBufferStrategy() != 4)
+    if (getBufferStrategy() != 3 && getBufferStrategy() != 4){
         /*mIOStatLogStream << now.toLocal8Bit().constData() << " "
                          << getPeerAddress().toLocal8Bit().constData()
                          << ":" << mSenderPeerPort << " "
