@@ -91,6 +91,7 @@ UdpDataProtocol::UdpDataProtocol(JackTrip* jacktrip, const runModeT runmode,
     , mControlPacketSize(63)
     , mStopSignalSent(false)
 {
+    mOpusDecoder = NULL;
     mStopped = false;
     mIPv6    = false;
     std::memset(&mPeerAddr, 0, sizeof(mPeerAddr));
@@ -113,6 +114,12 @@ UdpDataProtocol::~UdpDataProtocol()
 {
     delete[] mAudioPacket;
     delete[] mFullPacket;
+    if(mOpusDecoder != NULL){
+        for(int i = 0; i < mChans; i++){
+            opus_decoder_destroy(mOpusDecoder[i]);
+        }
+        delete[] mOpusDecoder;
+    }
     if (mRunMode == RECEIVER) {
 #ifdef _WIN32
         closesocket(mSocket);
@@ -338,12 +345,82 @@ void UdpDataProtocol::processControlPacket(const char* buf)
 //*******************************************************************************
 int UdpDataProtocol::receivePacket(char* buf, const size_t n)
 {
-    int n_bytes = ::recv(mSocket, buf, n, 0);
+    //This buffer can be much smaller, maybe 40 to 48 bytes for 240 samples, so divide by 5?
+    //when we tried 5 we got lots of core dumps, put the len as the first element in the header
+    //then peak at the header and allocate the buffer based on the len
+    int opus_packet_size = n;
+    int8_t* opus_packet = new int8_t[opus_packet_size];
+    int n_bytes = ::recv(mSocket, opus_packet, opus_packet_size, 0);
     if (n_bytes == mControlPacketSize) {
-        processControlPacket(buf);
+        std::cout << "control packet" << std::endl;
+        processControlPacket((char*)opus_packet);
+        delete[] opus_packet;
         return 0;
     }
-    return n_bytes;
+
+    if(n_bytes < mJackTrip->getHeaderSizeInBytes()){
+        std::cout << "short buffer 0" << std::endl;
+        delete[] opus_packet;
+        return 0;
+    }
+
+    //check the mSmplSize, if its a power of 2, then skip the opus decoding
+    //if its not, then we need to decode the opus packet
+    //TODO
+
+    if(mOpusDecoder == NULL){
+        mOpusDecoder = new OpusDecoder*[mChans];
+        for(int i = 0; i < mChans; i++){
+            mOpusDecoder[i] = opus_decoder_create(mJackTrip->getSampleRate(), 1, NULL);
+        }
+        //mOpusDecoder = opus_decoder_create(mJackTrip->getSampleRate(), mChans, NULL);    
+    }
+    
+    //copy header from opus_packet to buf
+    std::memcpy(buf, opus_packet, mJackTrip->getHeaderSizeInBytes());
+
+    //increment opus_packet pointer to the start of the opus payload
+    int8_t* opus_packet_start_of_audio = opus_packet + mJackTrip->getHeaderSizeInBytes();
+    char* start_of_audio_buf = buf + mJackTrip->getHeaderSizeInBytes();
+
+    //iterate through the audio data.  the first byte of the data is the length of a channel.
+    //store an array of with the lengths and the pointer to the start of each channel.
+    //then decode each channel.
+    //then copy the decoded data to the appropriate place in the buffer
+    //then delete the opus_packet
+    //then return the size of the buffer
+    int decoded_samples = 0;
+    int n_bytes_remaining = n_bytes - mJackTrip->getHeaderSizeInBytes();
+    for(int i = 0; i < mChans; i++){
+        //check if we are looking for a length that would be after b_bytes
+        //TODO
+        if(n_bytes_remaining < 1){
+            std::cout << "short buffer 1" << std::endl;
+            delete[] opus_packet;
+            return 0;
+        }
+        n_bytes_remaining--;
+        int length = opus_packet_start_of_audio[0];
+        opus_packet_start_of_audio++;
+        if(n_bytes_remaining < length){
+            std::cout << "short buffer 2" << std::endl;
+            delete[] opus_packet;
+            return 0;
+
+        }
+        n_bytes_remaining -= length;
+        decoded_samples += opus_decode(mOpusDecoder[i], (unsigned char*)opus_packet_start_of_audio, (opus_int32)length, (opus_int16*)(start_of_audio_buf + decoded_samples * mSmplSize), mJackTrip->getBufferSizeInSamples(), 0);
+        if(decoded_samples <= 0){
+            std::cout << "opus_decode failed" << std::endl;
+            delete[] opus_packet;
+            return 0;
+        }
+        opus_packet_start_of_audio += length;
+    }
+
+    int total_returned_size = mJackTrip->getHeaderSizeInBytes() + decoded_samples * mSmplSize;
+    delete[] opus_packet;
+    return total_returned_size;
 }
 
 //*******************************************************************************

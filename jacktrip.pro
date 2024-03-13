@@ -109,7 +109,8 @@ bundled_rtaudio {
 macx {
   message(Building on MAC OS X)
   CONFIG -= app_bundle
-  LIBS += -framework CoreAudio -framework CoreFoundation
+  INCLUDEPATH += /Users/evan/Projects/jacktrip/externals/opus-1.4/include
+  LIBS += -framework CoreAudio -framework CoreFoundation -L/Users/evan/Projects/jacktrip/externals/opus-1.4/.libs -lopus
   !nogui {
     LIBS += -framework Foundation
     CONFIG += objective_c

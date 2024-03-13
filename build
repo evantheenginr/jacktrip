@@ -123,7 +123,8 @@ elif [[ $platform == 'macosx' ]]; then
   echo "$(which qmake)"
   if ! command -v $QCMD &> /dev/null; then
     # echo "qmake not found in \$PATH, searching for homebrew qt5"
-    QT_PREFIX=`brew --prefix qt5`
+    #QT_PREFIX=`brew --prefix qt5`
+    QT_PREFIX=/Users/evan/Projects/qt-everywhere-src-6.6.1/qtbase
     if [[ -n $QT_PREFIX ]]; then
       QCMD="$QT_PREFIX/bin/$QCMD"
       echo "Using qmake at $QCMD"

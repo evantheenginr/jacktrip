@@ -45,6 +45,7 @@
 #include <random>
 #include <stdexcept>
 #include <vector>
+#include <opus.h>
 
 #include "DataProtocol.h"
 #include "jacktrip_globals.h"
@@ -196,6 +197,8 @@ class UdpDataProtocol : public DataProtocol
                                       int full_packet_size);
 
    private:
+    OpusDecoder** mOpusDecoder;
+
     bool datagramAvailable();
 
     int mBindPort;            ///< Local Port number to Bind

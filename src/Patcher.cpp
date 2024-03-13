@@ -136,9 +136,9 @@ void Patcher::registerClient(const QString& clientName)
                 if (m_loop) {
                     if (otherClient == clientName && otherChannel == channel) {
                         jack_connect(m_jackClient, clientOutPorts.at(i), inPorts[j]);
-                    } else if (m_steroUpmix && clientIsMono) {
+                    } else if (m_steroUpmix /*&& clientIsMono*/) {
                         if (otherClient == clientName
-                            && otherChannel == QLatin1String("2")) {
+                            /*&& otherChannel == QLatin1String("2")*/) {
                             jack_connect(m_jackClient, clientOutPorts.at(i), inPorts[j]);
                         }
                     }
