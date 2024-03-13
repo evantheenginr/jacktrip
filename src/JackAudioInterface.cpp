@@ -326,6 +326,8 @@ void JackAudioInterface::connectDefaultPorts()
 {
     const char** ports;
 
+    cout << "Connecting default audio ports..." << endl;
+
     // Get physical output (capture) ports
     if ((ports =
              jack_get_ports(mClient, NULL, NULL, JackPortIsPhysical | JackPortIsOutput))

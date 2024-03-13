@@ -83,7 +83,7 @@ void Patcher::registerClient(const QString& clientName)
     for (int i = 0; outPorts[i]; i++) {
         // Exclude broadcast ports.
         if (QString(outPorts[i]).section(QStringLiteral(":"), 0, 0) == clientName
-            && !QString(outPorts[i]).contains(QLatin1String("broadcast"))) {
+            /*&& !QString(outPorts[i]).contains(QLatin1String("broadcast"))*/) {
             clientOutPorts.append(outPorts[i]);
         }
     }
@@ -95,6 +95,7 @@ void Patcher::registerClient(const QString& clientName)
     }
 
     bool clientIsMono = (clientOutPorts.count() == 1);
+    bool clientIsListener = !QString(clientOutPorts.at(0)).contains(QLatin1String("__"));
 
     if (m_includeServer && clientIsMono && m_steroUpmix) {
         // Most connections in server to client modes are created already by the code in
@@ -112,33 +113,46 @@ void Patcher::registerClient(const QString& clientName)
         for (int i = 0; i < clientOutPorts.count(); i++) {
             QString channel =
                 QString(clientOutPorts.at(i)).section(QStringLiteral("_"), -1, -1);
+            bool isBcast =
+                QString(clientOutPorts.at(i)).contains(QLatin1String("broadcast"));
             for (int j = 0; inPorts[j]; j++) {
                 QString otherClient =
                     QString(inPorts[j]).section(QStringLiteral(":"), 0, 0);
                 QString otherChannel =
                     QString(inPorts[j]).section(QStringLiteral("_"), -1, -1);
-
+                bool isOtherListener =
+                    !otherClient.contains(QLatin1String("__"));
                 // First check if this is one of our other clients. (Fan out/in and full
                 // mix.)
-                if (m_fan) {
+                if (m_fan && (
+                        (!isBcast && !clientIsListener && !isOtherListener) ||
+                        (isBcast && !clientIsListener && isOtherListener) ||
+                        (isBcast && clientIsListener)
+                    )) {
                     if (m_clients.contains(otherClient) && otherChannel == channel) {
+                        std::cout << "m_fan connect " << clientOutPorts.at(i) << " -> " << inPorts[j] << std::endl;
                         jack_connect(m_jackClient, clientOutPorts.at(i), inPorts[j]);
                     } else if (m_steroUpmix /*&& clientIsMono*/) {
                         // Deal with the special case of stereo upmix
                         if (m_clients.contains(otherClient)
                             /*&& otherChannel == QLatin1String("2")*/) {
+                            std::cout << "m_fan connect upmix " << clientOutPorts.at(i) << " -> " << inPorts[j] << std::endl;
                             jack_connect(m_jackClient, clientOutPorts.at(i), inPorts[j]);
                         }
                     }
                 }
 
                 // Then check if it's our registering client. (Client Echo and full mix.)
-                if (m_loop) {
+                if (m_loop && !isBcast) {
+                    std::cout << "m_loop " << "|" << otherClient.toUtf8().constData() << "|" << clientName.toUtf8().constData() << "|" << channel.toUtf8().constData() << "|" << otherChannel.toUtf8().constData() << std::endl;
                     if (otherClient == clientName && otherChannel == channel) {
+                        std::cout << "m_loop connect " << clientOutPorts.at(i) << " -> " << inPorts[j] << std::endl;
                         jack_connect(m_jackClient, clientOutPorts.at(i), inPorts[j]);
-                    } else if (m_steroUpmix && clientIsMono) {
+                    } else if (m_steroUpmix /*&& clientIsMono*/) {
+                        std::cout << "m_loop upmix" << std::endl;
                         if (otherClient == clientName
-                            && otherChannel == QLatin1String("2")) {
+                            /*&& otherChannel == QLatin1String("2")*/) {
+                            std::cout << "m_loop upmix connect " << clientOutPorts.at(i) << " -> " << inPorts[j] << std::endl;
                             jack_connect(m_jackClient, clientOutPorts.at(i), inPorts[j]);
                         }
                     }
@@ -157,11 +171,19 @@ void Patcher::registerClient(const QString& clientName)
                         QString(outPorts[j]).section(QStringLiteral(":"), 0, 0);
                     QString otherChannel =
                         QString(outPorts[j]).section(QStringLiteral("_"), -1, -1);
-                    if (m_clients.contains(otherClient)
-                        && !QString(outPorts[j]).contains(QLatin1String("broadcast"))) {
+                    bool isOtherBcast =
+                        QString(outPorts[j]).contains(QLatin1String("broadcast"));
+                    bool isOtherListener =
+                        !otherClient.contains(QLatin1String("__"));
+                    if (m_clients.contains(otherClient) && (
+                        (clientIsListener && isOtherBcast) ||
+                        (!clientIsListener && !isOtherListener && !isOtherBcast) ||
+                        (!clientIsListener && isOtherListener && isOtherBcast)
+                    )) {
                         if (otherChannel == channel
                             || (m_steroUpmix /*&& channel == QLatin1String("2")
                                 && m_monoClients.contains(otherClient)*/)) {
+                            std::cout << "m_fan connect upmix on send " << outPorts[j] << " -> " << clientInPorts.at(i) << std::endl;
                             jack_connect(m_jackClient, outPorts[j], clientInPorts.at(i));
                         }
                     }
